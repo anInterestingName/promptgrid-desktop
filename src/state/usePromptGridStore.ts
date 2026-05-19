@@ -7,24 +7,46 @@ import {
 } from "../data/mockProject";
 import { getInitialLocale, saveLocale, type Locale } from "../i18n";
 import {
+  loadWorkspaceSnapshot,
+  saveWorkspaceSnapshot,
+} from "../services/localPersistence";
+import {
   getInitialColorTheme,
   saveColorTheme,
   type ColorTheme,
 } from "../theme";
-import type { AspectRatio, GridCell, Project, Quality } from "../types";
+import type {
+  AppSettings,
+  AppSnapshot,
+  AspectRatio,
+  GridCell,
+  Project,
+  Quality,
+} from "../types";
+
+type ActiveSection = "projects" | "settings";
+type StorageStatus = "idle" | "loading" | "saving" | "saved" | "error";
 
 type PromptGridState = {
   locale: Locale;
   colorTheme: ColorTheme;
+  activeSection: ActiveSection;
   project: Project;
   tasks: GridCell[];
+  settings: AppSettings;
   selectedTaskId?: string;
   previewTaskId?: string;
   isAnalyzing: boolean;
   isGenerating: boolean;
+  isHydrated: boolean;
+  isHydrating: boolean;
+  storageStatus: StorageStatus;
   currentRound: number;
+  hydrate: () => Promise<void>;
+  setActiveSection: (section: ActiveSection) => void;
   setLocale: (locale: Locale) => void;
   setColorTheme: (colorTheme: ColorTheme) => void;
+  updateSettings: (settings: Partial<AppSettings>) => void;
   setOriginalPrompt: (prompt: string) => void;
   setStyle: (style: string) => void;
   setAspectRatio: (aspectRatio: AspectRatio) => void;
@@ -40,6 +62,51 @@ type PromptGridState = {
 };
 
 const firstTasks = createMockTasks(mockProject);
+const firstSelectedTaskId = firstTasks[0]?.id;
+
+function createSnapshot(state: PromptGridState): AppSnapshot {
+  return {
+    project: state.project,
+    tasks: state.tasks,
+    settings: state.settings,
+    selectedTaskId: state.selectedTaskId,
+    currentRound: state.currentRound,
+  };
+}
+
+function normalizeSnapshot(snapshot: AppSnapshot) {
+  const selectedTaskId =
+    snapshot.selectedTaskId &&
+    snapshot.tasks.some((task) => task.id === snapshot.selectedTaskId)
+      ? snapshot.selectedTaskId
+      : snapshot.tasks[0]?.id;
+  const highestRound = snapshot.tasks.reduce(
+    (round, task) => Math.max(round, task.explorationRound),
+    1,
+  );
+
+  return {
+    project: snapshot.project,
+    tasks: snapshot.tasks,
+    settings: normalizeSettings(snapshot.settings),
+    selectedTaskId,
+    previewTaskId: undefined,
+    currentRound: Math.max(snapshot.currentRound, highestRound),
+  };
+}
+
+function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
+  const apiProvider =
+    settings.apiProvider === "custom" || settings.apiProvider === "openai"
+      ? settings.apiProvider
+      : mockSettings.apiProvider;
+
+  return {
+    ...mockSettings,
+    ...settings,
+    apiProvider,
+  };
+}
 
 function completeTask(task: GridCell, attempt = task.attempt): GridCell {
   return {
@@ -100,13 +167,52 @@ function runMockCompletion(
 export const usePromptGridStore = create<PromptGridState>((set, get) => ({
   locale: getInitialLocale(),
   colorTheme: getInitialColorTheme(),
+  activeSection: "projects",
   project: mockProject,
   tasks: firstTasks,
-  selectedTaskId: firstTasks[0]?.id,
+  settings: mockSettings,
+  selectedTaskId: firstSelectedTaskId,
   previewTaskId: undefined,
   isAnalyzing: false,
   isGenerating: false,
+  isHydrated: false,
+  isHydrating: false,
+  storageStatus: "idle",
   currentRound: 1,
+  hydrate: async () => {
+    const state = get();
+    if (state.isHydrated || state.isHydrating) {
+      return;
+    }
+
+    set({ isHydrating: true, storageStatus: "loading" });
+
+    try {
+      const snapshot = await loadWorkspaceSnapshot();
+      if (snapshot) {
+        set({
+          ...normalizeSnapshot(snapshot),
+          isHydrated: true,
+          isHydrating: false,
+          storageStatus: "saved",
+        });
+        return;
+      }
+
+      set({
+        isHydrated: true,
+        isHydrating: false,
+        storageStatus: "saved",
+      });
+    } catch {
+      set({
+        isHydrated: true,
+        isHydrating: false,
+        storageStatus: "error",
+      });
+    }
+  },
+  setActiveSection: (activeSection) => set({ activeSection }),
   setLocale: (locale) => {
     saveLocale(locale);
     set({ locale });
@@ -115,6 +221,13 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
     saveColorTheme(colorTheme);
     set({ colorTheme });
   },
+  updateSettings: (settings) =>
+    set((state) => ({
+      settings: {
+        ...state.settings,
+        ...settings,
+      },
+    })),
   setOriginalPrompt: (originalPrompt) =>
     set((state) => ({
       project: {
@@ -161,18 +274,19 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
   },
   generateImages: () => {
     const taskIds = get().tasks.map((task) => task.id);
+    const maxConcurrency = get().settings.maxConcurrency;
     set((state) => ({
       isGenerating: true,
       tasks: state.tasks.map((task, index) => ({
         ...task,
-        status: index < mockSettings.maxConcurrency ? "running" : "pending",
+        status: index < maxConcurrency ? "running" : "pending",
         errorMessage: undefined,
         updatedAt: new Date().toISOString(),
       })),
     }));
 
     taskIds.forEach((taskId, index) => {
-      if (index >= mockSettings.maxConcurrency) {
+      if (index >= maxConcurrency) {
         window.setTimeout(
           () => {
             set((state) => ({
@@ -280,3 +394,38 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
     });
   },
 }));
+
+let saveTimer: number | undefined;
+let lastQueuedSnapshot = "";
+let saveQueue = Promise.resolve();
+
+usePromptGridStore.subscribe((state) => {
+  if (!state.isHydrated || state.isHydrating) {
+    return;
+  }
+
+  const snapshot = createSnapshot(state);
+  const serializedSnapshot = JSON.stringify(snapshot);
+  if (serializedSnapshot === lastQueuedSnapshot) {
+    return;
+  }
+
+  lastQueuedSnapshot = serializedSnapshot;
+  window.clearTimeout(saveTimer);
+  saveTimer = window.setTimeout(() => {
+    usePromptGridStore.setState({ storageStatus: "saving" });
+    const saveJob = saveQueue
+      .catch(() => undefined)
+      .then(() => saveWorkspaceSnapshot(snapshot));
+
+    saveQueue = saveJob;
+
+    void saveJob
+      .then(() => {
+        usePromptGridStore.setState({ storageStatus: "saved" });
+      })
+      .catch(() => {
+        usePromptGridStore.setState({ storageStatus: "error" });
+      });
+  }, 220);
+});

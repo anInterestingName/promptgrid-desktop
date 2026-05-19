@@ -17,9 +17,17 @@ export const mockProject: Project = {
 };
 
 export const mockSettings: AppSettings = {
-  apiProvider: "mock-local",
-  textModel: "mock-variant-v1",
-  imageModel: "mock-image-v1",
+  apiProvider: "openai",
+  textModel: "gpt-4o-mini",
+  imageModel: "gpt-image-1",
+  openAiBaseUrl: "https://api.openai.com/v1",
+  openAiApiKeySaved: false,
+  customProviderName: "",
+  customBaseUrl: "",
+  customApiKeySaved: false,
+  customTextModel: "",
+  customImageModel: "",
+  customHeaders: "",
   maxConcurrency: 3,
   defaultGridSize: 9,
   defaultAspectRatio: "1:1",

@@ -4,6 +4,8 @@ export type AspectRatio = "1:1" | "16:9" | "9:16" | "4:3";
 
 export type Quality = "draft" | "standard" | "high";
 
+export type ApiProvider = "openai" | "custom";
+
 export type TaskStatus =
   | "pending"
   | "running"
@@ -41,9 +43,17 @@ export type ImageTask = {
 };
 
 export type AppSettings = {
-  apiProvider: string;
+  apiProvider: ApiProvider;
   textModel: string;
   imageModel: string;
+  openAiBaseUrl: string;
+  openAiApiKeySaved: boolean;
+  customProviderName?: string;
+  customBaseUrl?: string;
+  customApiKeySaved: boolean;
+  customTextModel?: string;
+  customImageModel?: string;
+  customHeaders?: string;
   maxConcurrency: number;
   defaultGridSize: GridSize;
   defaultAspectRatio: AspectRatio;
@@ -59,4 +69,17 @@ export type MockVisual = {
 export type GridCell = ImageTask & {
   attempt: number;
   visual: MockVisual;
+};
+
+export type AppSnapshot = {
+  project: Project;
+  tasks: GridCell[];
+  settings: AppSettings;
+  selectedTaskId?: string;
+  currentRound: number;
+};
+
+export type ModelOption = {
+  id: string;
+  ownedBy?: string;
 };

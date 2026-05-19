@@ -11,15 +11,17 @@ const recentProjects = [
 const navItems: Array<{
   label: MessageKey;
   icon: typeof FolderOpen;
-  active: boolean;
+  section?: "projects" | "settings";
 }> = [
-  { label: "projects", icon: FolderOpen, active: true },
-  { label: "history", icon: History, active: false },
-  { label: "settings", icon: Settings2, active: false },
+  { label: "projects", icon: FolderOpen, section: "projects" },
+  { label: "history", icon: History },
+  { label: "settings", icon: Settings2, section: "settings" },
 ];
 
 export function ProjectSidebar() {
   const locale = usePromptGridStore((state) => state.locale);
+  const activeSection = usePromptGridStore((state) => state.activeSection);
+  const setActiveSection = usePromptGridStore((state) => state.setActiveSection);
   const currentRound = usePromptGridStore((state) => state.currentRound);
   const completedCount = usePromptGridStore(
     (state) => state.tasks.filter((task) => task.status === "completed").length,
@@ -40,11 +42,17 @@ export function ProjectSidebar() {
       <nav className="nav-stack" aria-label={t(locale, "workspaceSections")}>
         {navItems.map((item) => {
           const Icon = item.icon;
+          const isActive = item.section === activeSection;
           return (
             <button
-              className={item.active ? "nav-item active" : "nav-item"}
+              className={isActive ? "nav-item active" : "nav-item"}
               key={item.label}
               type="button"
+              onClick={() => {
+                if (item.section) {
+                  setActiveSection(item.section);
+                }
+              }}
             >
               <Icon size={17} aria-hidden="true" />
               <span>{t(locale, item.label)}</span>

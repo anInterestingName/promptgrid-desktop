@@ -10,12 +10,16 @@ export function TopBar() {
   const colorTheme = usePromptGridStore((state) => state.colorTheme);
   const setColorTheme = usePromptGridStore((state) => state.setColorTheme);
   const currentRound = usePromptGridStore((state) => state.currentRound);
+  const activeSection = usePromptGridStore((state) => state.activeSection);
+  const eyebrowKey =
+    activeSection === "settings" ? "localConfiguration" : "localProject";
+  const titleKey = activeSection === "settings" ? "settingsTitle" : "projectTitle";
 
   return (
     <header className="topbar">
       <div>
-        <p className="eyebrow">{t(locale, "localProject")}</p>
-        <h1>{t(locale, "projectTitle")}</h1>
+        <p className="eyebrow">{t(locale, eyebrowKey)}</p>
+        <h1>{t(locale, titleKey)}</h1>
       </div>
       <div className="topbar-actions">
         <div className="toolbar-control">

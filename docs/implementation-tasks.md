@@ -28,20 +28,20 @@
 
 ## M2: Local Persistence
 
-- [ ] Add SQLite integration.
-- [ ] Create `projects` table.
-- [ ] Create `image_tasks` table.
-- [ ] Create `settings` table.
-- [ ] Persist local project state.
-- [ ] Persist task state.
+- [x] Add SQLite integration.
+- [x] Create `projects` table.
+- [x] Create `image_tasks` table.
+- [x] Create `settings` table.
+- [x] Persist local project state.
+- [x] Persist task state.
 - [ ] Save generated images into project folder.
 - [ ] Reopen recent projects.
 
 ## M3: Real AI Integration
 
 - [ ] Add provider abstraction.
-- [ ] Add API key settings UI.
-- [ ] Store API key securely or behind local command boundary.
+- [x] Add API key settings UI.
+- [x] Store API key securely or behind local command boundary.
 - [ ] Implement prompt variant provider.
 - [ ] Implement image provider.
 - [ ] Add retry behavior.
