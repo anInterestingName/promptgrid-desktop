@@ -4,7 +4,13 @@ export type AspectRatio = "1:1" | "16:9" | "9:16" | "4:3";
 
 export type Quality = "draft" | "standard" | "high";
 
+export type OutputSize = "standard" | "large" | "2k" | "4k";
+
 export type ApiProvider = "openai" | "custom";
+
+export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
+
+export type ResponseVerbosity = "low" | "medium" | "high";
 
 export type TaskStatus =
   | "pending"
@@ -21,6 +27,7 @@ export type Project = {
   gridSize: GridSize;
   aspectRatio: AspectRatio;
   quality: Quality;
+  outputSize: OutputSize;
   schemaVersion: number;
   createdAt: string;
   updatedAt: string;
@@ -33,6 +40,7 @@ export type ImageTask = {
   explorationRound: number;
   index: number;
   prompt: string;
+  directionTitle?: string;
   status: TaskStatus;
   imagePath?: string;
   errorMessage?: string;
@@ -54,6 +62,10 @@ export type AppSettings = {
   customTextModel?: string;
   customImageModel?: string;
   customHeaders?: string;
+  reasoningEnabled: boolean;
+  reasoningEffort: ReasoningEffort;
+  responseVerbosity: ResponseVerbosity;
+  streamResponses: boolean;
   maxConcurrency: number;
   defaultGridSize: GridSize;
   defaultAspectRatio: AspectRatio;

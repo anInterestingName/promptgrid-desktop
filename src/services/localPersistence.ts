@@ -4,6 +4,13 @@ import type { AppSnapshot } from "../types";
 const FALLBACK_STORAGE_KEY = "promptgrid.workspace.snapshot.v1";
 const DEV_SECRET_PREFIX = "promptgrid.dev.api-key";
 
+export type StorageInfo = {
+  currentDataDir: string;
+  databasePath: string;
+  defaultDataDir: string;
+  usesCustomDataDir: boolean;
+};
+
 export async function loadWorkspaceSnapshot(): Promise<AppSnapshot | null> {
   if (isTauri()) {
     return invoke<AppSnapshot | null>("load_workspace");
@@ -36,6 +43,34 @@ export async function saveWorkspaceSnapshot(
     FALLBACK_STORAGE_KEY,
     JSON.stringify(sanitizeSnapshot(snapshot)),
   );
+}
+
+export async function getStorageInfo(): Promise<StorageInfo | null> {
+  if (!isTauri()) {
+    return null;
+  }
+
+  return invoke<StorageInfo>("get_storage_info");
+}
+
+export async function setDataDirectory(
+  directory?: string,
+): Promise<StorageInfo | null> {
+  if (!isTauri()) {
+    return null;
+  }
+
+  return invoke<StorageInfo>("set_data_directory", {
+    directory: directory?.trim() || null,
+  });
+}
+
+export async function pickDataDirectory(): Promise<string | null> {
+  if (!isTauri()) {
+    return null;
+  }
+
+  return invoke<string | null>("pick_data_directory");
 }
 
 function sanitizeSnapshot(snapshot: AppSnapshot): AppSnapshot {

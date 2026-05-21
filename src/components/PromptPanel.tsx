@@ -1,17 +1,19 @@
 import {
   aspectRatioOptions,
+  outputSizeOptions,
   qualityOptions,
   styleOptions,
 } from "../data/mockProject";
-import { qualityLabels, styleLabels, t } from "../i18n";
+import { outputSizeLabels, qualityLabels, styleLabels, t } from "../i18n";
 import { usePromptGridStore } from "../state/usePromptGridStore";
-import type { AspectRatio, Quality } from "../types";
+import type { AspectRatio, OutputSize, Quality } from "../types";
 import { Check, ChevronDown, Play, Sparkles, Wand2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 export function PromptPanel() {
   const locale = usePromptGridStore((state) => state.locale);
   const project = usePromptGridStore((state) => state.project);
+  const settings = usePromptGridStore((state) => state.settings);
   const isAnalyzing = usePromptGridStore((state) => state.isAnalyzing);
   const isGenerating = usePromptGridStore((state) => state.isGenerating);
   const setOriginalPrompt = usePromptGridStore(
@@ -20,11 +22,19 @@ export function PromptPanel() {
   const setStyle = usePromptGridStore((state) => state.setStyle);
   const setAspectRatio = usePromptGridStore((state) => state.setAspectRatio);
   const setQuality = usePromptGridStore((state) => state.setQuality);
+  const setOutputSize = usePromptGridStore((state) => state.setOutputSize);
   const analyzePrompt = usePromptGridStore((state) => state.analyzePrompt);
   const generateImages = usePromptGridStore((state) => state.generateImages);
   const [isStyleOpen, setIsStyleOpen] = useState(false);
   const styleFieldRef = useRef<HTMLDivElement>(null);
   const selectedStyleLabel = styleLabels[locale][project.style];
+  const configuredImageModel =
+    settings.apiProvider === "openai"
+      ? settings.imageModel
+      : settings.customImageModel ?? "";
+  const supportsFlexibleOutputSize =
+    settings.apiProvider === "custom" ||
+    configuredImageModel.toLowerCase().includes("gpt-image-2");
 
   useEffect(() => {
     function closeStyleField(event: PointerEvent) {
@@ -145,12 +155,39 @@ export function PromptPanel() {
         </div>
       </section>
 
+      <section className="panel-section">
+        <span className="field-label">{t(locale, "outputSize")}</span>
+        <div className="segmented-control">
+          {outputSizeOptions.map((outputSize) => {
+            const requiresFlexibleSize =
+              outputSize === "2k" || outputSize === "4k";
+            const isDisabled =
+              requiresFlexibleSize && !supportsFlexibleOutputSize;
+
+            return (
+              <button
+                className={project.outputSize === outputSize ? "active" : ""}
+                disabled={isDisabled}
+                key={outputSize}
+                title={
+                  isDisabled ? t(locale, "outputSizeRequiresGptImage2") : ""
+                }
+                type="button"
+                onClick={() => setOutputSize(outputSize as OutputSize)}
+              >
+                {outputSizeLabels[locale][outputSize]}
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
       <div className="action-stack">
         <button
           className="primary-action"
           type="button"
           onClick={analyzePrompt}
-          disabled={isAnalyzing}
+          disabled={isAnalyzing || isGenerating}
         >
           <Wand2 size={18} aria-hidden="true" />
           {isAnalyzing ? t(locale, "analyzing") : t(locale, "analyzePrompts")}
@@ -159,7 +196,7 @@ export function PromptPanel() {
           className="secondary-action"
           type="button"
           onClick={generateImages}
-          disabled={isGenerating}
+          disabled={isGenerating || isAnalyzing}
         >
           <Play size={18} aria-hidden="true" />
           {isGenerating ? t(locale, "generating") : t(locale, "generateImages")}

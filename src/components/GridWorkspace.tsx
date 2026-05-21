@@ -8,7 +8,7 @@ import {
   X,
 } from "lucide-react";
 import { useMemo } from "react";
-import { statusLabels, t, visualLabels, type Locale } from "../i18n";
+import { statusLabels, t, type Locale } from "../i18n";
 import { usePromptGridStore } from "../state/usePromptGridStore";
 import type { GridCell } from "../types";
 
@@ -81,7 +81,7 @@ export function GridWorkspace() {
             <div className="dialog-topline">
               <Dialog.Title>
                 {previewTaskValue
-                  ? visualLabels[locale][previewTaskValue.visual.title]
+                  ? getTaskDirectionTitle(previewTaskValue, locale)
                   : t(locale, "preview")}
               </Dialog.Title>
               <Dialog.Close
@@ -128,6 +128,7 @@ function GridCellCard({
   onUpdatePrompt,
 }: GridCellCardProps) {
   const canPreview = task.status === "completed";
+  const directionTitle = getTaskDirectionTitle(task, locale);
 
   return (
     <article
@@ -148,7 +149,7 @@ function GridCellCard({
           <span>
             {t(locale, "cell")} {task.index + 1}
           </span>
-          <strong>{visualLabels[locale][task.visual.title]}</strong>
+          <strong>{directionTitle}</strong>
         </div>
         <textarea
           aria-label={`${t(locale, "promptForCell")} ${task.index + 1}`}
@@ -216,6 +217,10 @@ function GridCellCard({
   );
 }
 
+function getTaskDirectionTitle(task: GridCell, locale: Locale) {
+  return task.directionTitle?.trim() || `${t(locale, "direction")} ${task.index + 1}`;
+}
+
 function MockImage({
   task,
   large = false,
@@ -223,6 +228,16 @@ function MockImage({
   task: GridCell;
   large?: boolean;
 }) {
+  if (task.imagePath?.startsWith("data:image/")) {
+    return (
+      <img
+        alt={task.prompt}
+        className={`generated-image${large ? " large" : ""}`}
+        src={task.imagePath}
+      />
+    );
+  }
+
   const [toneA, toneB, toneC] = task.visual.palette;
   const style = {
     "--tone-a": toneA,

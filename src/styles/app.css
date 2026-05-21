@@ -566,18 +566,31 @@ select:focus {
 
 .cell-body textarea {
   height: 72px;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
   resize: none;
   border-color: rgba(21, 36, 64, 0.08);
   padding: 9px;
   color: var(--ink-soft);
   font-size: 0.78rem;
   line-height: 1.35;
-  scrollbar-width: none;
+  scrollbar-color: rgba(82, 105, 140, 0.44) transparent;
+  scrollbar-width: thin;
 }
 
 .cell-body textarea::-webkit-scrollbar {
-  display: none;
+  width: 8px;
+}
+
+.cell-body textarea::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(82, 105, 140, 0.42);
+  background-clip: padding-box;
+}
+
+.cell-body textarea::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 select {
@@ -827,6 +840,20 @@ select {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.settings-help {
+  margin: -6px 0 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.settings-actions-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
 .settings-field.wide-field {
   grid-column: 1 / -1;
 }
@@ -895,6 +922,15 @@ select {
     linear-gradient(180deg, rgba(255, 250, 251, 0.98), rgba(255, 255, 255, 0.94)),
     #ffffff;
   color: var(--red);
+}
+
+.settings-notice.success {
+  border-color: rgba(10, 89, 247, 0.2);
+  border-left-color: var(--cyan);
+  background:
+    linear-gradient(180deg, rgba(246, 253, 255, 0.98), rgba(255, 255, 255, 0.94)),
+    #ffffff;
+  color: var(--blue-deep);
 }
 
 .settings-notice strong,
@@ -973,6 +1009,14 @@ select {
   color: var(--blue);
 }
 
+.model-config-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .model-fetch-control {
   display: inline-flex;
   position: relative;
@@ -986,21 +1030,30 @@ select {
   min-width: 112px;
 }
 
-.model-fetch-status {
-  position: absolute;
-  top: 50%;
-  right: calc(100% + 8px);
+.test-connection-action {
+  min-width: 124px;
+}
+
+.model-test-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.model-fetch-status,
+.model-test-status {
   overflow: hidden;
   max-width: 180px;
   color: var(--ink-soft);
   font-size: 0.78rem;
   font-weight: 720;
-  transform: translateY(-50%);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.model-fetch-status.ready {
+.model-fetch-status.ready,
+.model-test-status.ready {
   color: var(--blue-deep);
 }
 
@@ -1038,6 +1091,11 @@ select {
   padding: 0 10px;
 }
 
+.settings-input[readonly] {
+  cursor: default;
+  background: rgba(248, 251, 255, 0.9);
+}
+
 .settings-textarea {
   min-height: 84px;
   resize: vertical;
@@ -1046,7 +1104,8 @@ select {
 }
 
 .input-with-icon,
-.secret-field {
+.secret-field,
+.model-combobox {
   position: relative;
 }
 
@@ -1067,6 +1126,102 @@ select {
 
 .secret-field .settings-input {
   padding-right: 42px;
+}
+
+.model-combobox .settings-input {
+  padding-right: 42px;
+}
+
+.model-combobox-toggle {
+  position: absolute;
+  top: 50%;
+  right: 5px;
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink-soft);
+  transform: translateY(-50%);
+  transition:
+    background 140ms ease,
+    color 140ms ease,
+    transform 160ms ease;
+}
+
+.model-combobox-toggle:hover,
+.model-combobox-toggle.open {
+  background: var(--blue-soft);
+  color: var(--blue-deep);
+}
+
+.model-combobox-toggle.open {
+  transform: translateY(-50%) rotate(180deg);
+}
+
+.model-options-menu {
+  position: absolute;
+  z-index: 35;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  display: grid;
+  max-height: 260px;
+  overflow: auto;
+  gap: 4px;
+  border: 1px solid rgba(10, 89, 247, 0.14);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.98);
+  padding: 6px;
+  box-shadow: 0 18px 44px rgba(24, 49, 86, 0.16);
+}
+
+.model-option {
+  display: grid;
+  min-height: 38px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  padding: 0 10px;
+  color: var(--ink-soft);
+  text-align: left;
+}
+
+.model-option span,
+.model-option small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-option span {
+  color: var(--ink);
+  font-size: 0.82rem;
+  font-weight: 760;
+}
+
+.model-option small {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.model-option:hover,
+.model-option.selected {
+  background: var(--blue-soft);
+  color: var(--blue-deep);
+}
+
+.model-options-empty {
+  padding: 10px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 720;
 }
 
 .secret-toggle {
@@ -1149,6 +1304,43 @@ select {
 
 .settings-segmented {
   max-width: 420px;
+}
+
+.runtime-parameters {
+  border-top: 1px solid var(--line);
+  padding-top: 4px;
+}
+
+.runtime-parameter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 16px;
+  align-items: end;
+}
+
+.runtime-segmented {
+  max-width: none;
+}
+
+.settings-check {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+  padding: 0 12px;
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+  font-weight: 760;
+}
+
+.settings-check input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--blue);
 }
 
 .save-state {
@@ -1284,6 +1476,22 @@ select {
     linear-gradient(135deg, var(--tone-a), transparent 50%),
     linear-gradient(225deg, var(--tone-b), transparent 55%),
     linear-gradient(0deg, var(--tone-c), #f7fbff);
+}
+
+.generated-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.generated-image.large {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  height: auto;
+  max-height: 62vh;
+  border-radius: 8px;
 }
 
 .mock-image::before {
@@ -1465,13 +1673,16 @@ select {
 
 .dialog-overlay {
   position: fixed;
+  z-index: 80;
   inset: 0;
-  background: rgba(17, 26, 42, 0.5);
-  backdrop-filter: blur(8px);
+  background: rgba(17, 26, 42, 0.56);
+  backdrop-filter: blur(14px) saturate(0.82);
+  -webkit-backdrop-filter: blur(14px) saturate(0.82);
 }
 
 .preview-dialog {
   position: fixed;
+  z-index: 90;
   top: 50%;
   left: 50%;
   display: grid;
@@ -1604,6 +1815,7 @@ select {
 
   .settings-fields.two-columns,
   .range-row,
+  .runtime-parameter-grid,
   .provider-switch,
   .model-config-title-row {
     grid-template-columns: 1fr;
@@ -1614,12 +1826,15 @@ select {
   }
 
   .model-config-title-row,
-  .model-fetch-control {
+  .model-config-actions,
+  .model-fetch-control,
+  .model-test-control {
     align-items: flex-start;
     flex-direction: column;
   }
 
-  .model-fetch-status {
+  .model-fetch-status,
+  .model-test-status {
     position: static;
     max-width: min(260px, calc(100vw - 64px));
     transform: none;

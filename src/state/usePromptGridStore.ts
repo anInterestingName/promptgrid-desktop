@@ -11,6 +11,10 @@ import {
   saveWorkspaceSnapshot,
 } from "../services/localPersistence";
 import {
+  analyzePromptDirections,
+  generatePromptImage,
+} from "../services/aiGeneration";
+import {
   getInitialColorTheme,
   saveColorTheme,
   type ColorTheme,
@@ -20,6 +24,7 @@ import type {
   AppSnapshot,
   AspectRatio,
   GridCell,
+  OutputSize,
   Project,
   Quality,
 } from "../types";
@@ -51,6 +56,7 @@ type PromptGridState = {
   setStyle: (style: string) => void;
   setAspectRatio: (aspectRatio: AspectRatio) => void;
   setQuality: (quality: Quality) => void;
+  setOutputSize: (outputSize: OutputSize) => void;
   analyzePrompt: () => void;
   generateImages: () => void;
   updateTaskPrompt: (taskId: string, prompt: string) => void;
@@ -74,6 +80,47 @@ function createSnapshot(state: PromptGridState): AppSnapshot {
   };
 }
 
+function createSnapshotSignature(state: PromptGridState) {
+  const taskSignature = state.tasks
+    .map((task) =>
+      [
+        task.id,
+        task.parentTaskId ?? "",
+        task.explorationRound,
+        task.index,
+        task.prompt,
+        task.directionTitle ?? "",
+        task.status,
+        task.errorMessage ?? "",
+        task.provider,
+        task.model,
+        task.attempt,
+        task.updatedAt,
+        getImagePathSignature(task.imagePath),
+        task.visual.title,
+        task.visual.texture,
+        ...task.visual.palette,
+      ].join("\u001f"),
+    )
+    .join("\u001e");
+
+  return JSON.stringify({
+    project: state.project,
+    settings: state.settings,
+    selectedTaskId: state.selectedTaskId ?? "",
+    currentRound: state.currentRound,
+    tasks: taskSignature,
+  });
+}
+
+function getImagePathSignature(imagePath?: string) {
+  if (!imagePath) {
+    return "";
+  }
+
+  return `${imagePath.length}:${imagePath.slice(0, 32)}`;
+}
+
 function normalizeSnapshot(snapshot: AppSnapshot) {
   const selectedTaskId =
     snapshot.selectedTaskId &&
@@ -86,12 +133,20 @@ function normalizeSnapshot(snapshot: AppSnapshot) {
   );
 
   return {
-    project: snapshot.project,
+    project: normalizeProject(snapshot.project),
     tasks: snapshot.tasks,
     settings: normalizeSettings(snapshot.settings),
     selectedTaskId,
     previewTaskId: undefined,
     currentRound: Math.max(snapshot.currentRound, highestRound),
+  };
+}
+
+function normalizeProject(project: Partial<Project>): Project {
+  return {
+    ...mockProject,
+    ...project,
+    outputSize: project.outputSize ?? mockProject.outputSize,
   };
 }
 
@@ -108,18 +163,23 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
   };
 }
 
-function completeTask(task: GridCell, attempt = task.attempt): GridCell {
-  return {
-    ...task,
-    attempt,
-    status: "completed",
-    imagePath: `mock://round-${task.explorationRound}-cell-${task.index + 1}`,
-    errorMessage: undefined,
-    updatedAt: new Date().toISOString(),
-  };
+function getConfiguredImageModel(settings: AppSettings) {
+  return settings.apiProvider === "openai"
+    ? settings.imageModel
+    : settings.customImageModel || "";
 }
 
-function runMockCompletion(
+function getConfiguredProviderLabel(settings: AppSettings) {
+  return settings.apiProvider === "openai"
+    ? "openai"
+    : settings.customProviderName?.trim() || "custom";
+}
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function runImageGeneration(
   get: () => PromptGridState,
   set: (
     partial:
@@ -128,40 +188,78 @@ function runMockCompletion(
   ) => void,
   taskIds: string[],
 ) {
-  taskIds.forEach((taskId, position) => {
-    window.setTimeout(
-      () => {
-        set((state) => {
-          const tasks = state.tasks.map((task) => {
-            if (task.id !== taskId) {
-              return task;
-            }
+  const maxConcurrency = get().settings.maxConcurrency;
+  const pendingTaskIds = [...taskIds];
+  const workerCount = Math.max(1, Math.min(maxConcurrency, pendingTaskIds.length));
 
-            const shouldFail = position === 5 && task.attempt === 1;
-            return shouldFail
+  async function runWorker() {
+    while (pendingTaskIds.length > 0) {
+      const taskId = pendingTaskIds.shift();
+      if (!taskId) {
+        return;
+      }
+
+      set((state) => ({
+        tasks: state.tasks.map((task) =>
+          task.id === taskId
+            ? {
+                ...task,
+                status: "running",
+                errorMessage: undefined,
+                updatedAt: new Date().toISOString(),
+              }
+            : task,
+        ),
+      }));
+
+      const state = get();
+      const task = state.tasks.find((candidate) => candidate.id === taskId);
+      if (!task) {
+        continue;
+      }
+
+      try {
+        const image = await generatePromptImage(
+          task.prompt,
+          state.project,
+          state.settings,
+        );
+        const provider = getConfiguredProviderLabel(state.settings);
+        const model = getConfiguredImageModel(state.settings);
+        set((latestState) => ({
+          tasks: latestState.tasks.map((candidate) =>
+            candidate.id === taskId
               ? {
-                  ...task,
-                  status: "failed" as const,
-                  errorMessage: "Mock provider timeout",
+                  ...candidate,
+                  provider,
+                  model,
+                  status: "completed",
+                  imagePath: image.imageDataUrl,
+                  errorMessage: undefined,
                   updatedAt: new Date().toISOString(),
                 }
-              : completeTask(task);
-          });
-
-          const isGenerating = tasks.some((task) => task.status === "running");
-          return { tasks, isGenerating };
-        });
-      },
-      520 + position * 180,
-    );
-  });
-
-  window.setTimeout(() => {
-    const stillRunning = get().tasks.some((task) => task.status === "running");
-    if (!stillRunning) {
-      set({ isGenerating: false });
+              : candidate,
+          ),
+        }));
+      } catch (error) {
+        set((latestState) => ({
+          tasks: latestState.tasks.map((candidate) =>
+            candidate.id === taskId
+              ? {
+                  ...candidate,
+                  status: "failed",
+                  errorMessage: getErrorMessage(error),
+                  updatedAt: new Date().toISOString(),
+                }
+              : candidate,
+          ),
+        }));
+      }
     }
-  }, 2500);
+  }
+
+  await Promise.all(Array.from({ length: workerCount }, runWorker));
+  set({ isGenerating: false });
 }
 
 export const usePromptGridStore = create<PromptGridState>((set, get) => ({
@@ -256,57 +354,85 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
         updatedAt: new Date().toISOString(),
       },
     })),
+  setOutputSize: (outputSize) =>
+    set((state) => ({
+      project: {
+        ...state.project,
+        outputSize,
+        updatedAt: new Date().toISOString(),
+      },
+    })),
   analyzePrompt: () => {
+    if (get().isAnalyzing || get().isGenerating) {
+      return;
+    }
+
     set({ isAnalyzing: true });
-    window.setTimeout(() => {
+    void (async () => {
       const state = get();
-      const tasks = createMockTasks(
+      const baseTasks = createMockTasks(
         state.project,
         state.project.originalPrompt,
         state.currentRound,
       );
-      set({
-        tasks,
-        selectedTaskId: tasks[0]?.id,
-        isAnalyzing: false,
-      });
-    }, 420);
+
+      try {
+        const directions = await analyzePromptDirections(
+          state.project,
+          state.settings,
+        );
+        const provider = getConfiguredProviderLabel(state.settings);
+        const model = getConfiguredImageModel(state.settings);
+        const tasks = baseTasks.map((task, index) => ({
+          ...task,
+          prompt: directions[index]?.prompt || task.prompt,
+          directionTitle: directions[index]?.title,
+          provider,
+          model,
+          imagePath: undefined,
+          errorMessage: undefined,
+          status: "pending" as const,
+          updatedAt: new Date().toISOString(),
+        }));
+        set({
+          tasks,
+          selectedTaskId: tasks[0]?.id,
+          isAnalyzing: false,
+        });
+      } catch (error) {
+        const errorMessage = getErrorMessage(error);
+        const tasks = baseTasks.map((task) => ({
+          ...task,
+          status: "failed" as const,
+          errorMessage,
+          updatedAt: new Date().toISOString(),
+        }));
+        set({
+          tasks,
+          selectedTaskId: tasks[0]?.id,
+          isAnalyzing: false,
+        });
+      }
+    })();
   },
   generateImages: () => {
-    const taskIds = get().tasks.map((task) => task.id);
-    const maxConcurrency = get().settings.maxConcurrency;
+    const state = get();
+    if (state.isAnalyzing || state.isGenerating) {
+      return;
+    }
+
+    const taskIds = state.tasks.map((task) => task.id);
     set((state) => ({
       isGenerating: true,
-      tasks: state.tasks.map((task, index) => ({
+      tasks: state.tasks.map((task) => ({
         ...task,
-        status: index < maxConcurrency ? "running" : "pending",
+        status: "pending",
         errorMessage: undefined,
         updatedAt: new Date().toISOString(),
       })),
     }));
 
-    taskIds.forEach((taskId, index) => {
-      if (index >= maxConcurrency) {
-        window.setTimeout(
-          () => {
-            set((state) => ({
-              tasks: state.tasks.map((task) =>
-                task.id === taskId
-                  ? {
-                      ...task,
-                      status: "running",
-                      updatedAt: new Date().toISOString(),
-                    }
-                  : task,
-              ),
-            }));
-          },
-          360 + index * 120,
-        );
-      }
-    });
-
-    runMockCompletion(get, set, taskIds);
+    void runImageGeneration(get, set, taskIds);
   },
   updateTaskPrompt: (taskId, prompt) =>
     set((state) => ({
@@ -319,6 +445,10 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
   selectTask: (taskId) => set({ selectedTaskId: taskId }),
   previewTask: (taskId) => set({ previewTaskId: taskId }),
   regenerateTask: (taskId) => {
+    if (get().isAnalyzing || get().isGenerating) {
+      return;
+    }
+
     set((state) => ({
       isGenerating: true,
       tasks: state.tasks.map((task) =>
@@ -334,16 +464,13 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
       ),
     }));
 
-    window.setTimeout(() => {
-      set((state) => ({
-        isGenerating: false,
-        tasks: state.tasks.map((task) =>
-          task.id === taskId ? completeTask(task, task.attempt) : task,
-        ),
-      }));
-    }, 680);
+    void runImageGeneration(get, set, [taskId]);
   },
   retryTask: (taskId) => {
+    if (get().isAnalyzing || get().isGenerating) {
+      return;
+    }
+
     set((state) => ({
       isGenerating: true,
       tasks: state.tasks.map((task) =>
@@ -358,17 +485,14 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
       ),
     }));
 
-    window.setTimeout(() => {
-      set((state) => ({
-        isGenerating: false,
-        tasks: state.tasks.map((task) =>
-          task.id === taskId ? completeTask(task) : task,
-        ),
-      }));
-    }, 680);
+    void runImageGeneration(get, set, [taskId]);
   },
   expandFromTask: (taskId) => {
     const state = get();
+    if (state.isAnalyzing || state.isGenerating) {
+      return;
+    }
+
     const seedTask = state.tasks.find((task) => task.id === taskId);
 
     if (!seedTask) {
@@ -383,6 +507,7 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
       seedTask.id,
     ).map((task, index) => ({
       ...task,
+      directionTitle: undefined,
       visual: mockVisuals[(index + nextRound) % mockVisuals.length],
     }));
 
@@ -396,7 +521,8 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
 }));
 
 let saveTimer: number | undefined;
-let lastQueuedSnapshot = "";
+let pendingSnapshot: AppSnapshot | undefined;
+let lastQueuedSnapshotSignature = "";
 let saveQueue = Promise.resolve();
 
 usePromptGridStore.subscribe((state) => {
@@ -404,15 +530,22 @@ usePromptGridStore.subscribe((state) => {
     return;
   }
 
-  const snapshot = createSnapshot(state);
-  const serializedSnapshot = JSON.stringify(snapshot);
-  if (serializedSnapshot === lastQueuedSnapshot) {
+  const snapshotSignature = createSnapshotSignature(state);
+  if (snapshotSignature === lastQueuedSnapshotSignature) {
     return;
   }
 
-  lastQueuedSnapshot = serializedSnapshot;
+  lastQueuedSnapshotSignature = snapshotSignature;
+  pendingSnapshot = createSnapshot(state);
   window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(() => {
+    const snapshot = pendingSnapshot;
+    const saveSignature = lastQueuedSnapshotSignature;
+    if (!snapshot) {
+      return;
+    }
+
+    pendingSnapshot = undefined;
     usePromptGridStore.setState({ storageStatus: "saving" });
     const saveJob = saveQueue
       .catch(() => undefined)
@@ -422,10 +555,14 @@ usePromptGridStore.subscribe((state) => {
 
     void saveJob
       .then(() => {
-        usePromptGridStore.setState({ storageStatus: "saved" });
+        if (saveSignature === lastQueuedSnapshotSignature) {
+          usePromptGridStore.setState({ storageStatus: "saved" });
+        }
       })
       .catch(() => {
-        usePromptGridStore.setState({ storageStatus: "error" });
+        if (saveSignature === lastQueuedSnapshotSignature) {
+          usePromptGridStore.setState({ storageStatus: "error" });
+        }
       });
-  }, 220);
+  }, 500);
 });

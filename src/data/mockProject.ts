@@ -11,6 +11,7 @@ export const mockProject: Project = {
   gridSize: 9,
   aspectRatio: "1:1",
   quality: "draft",
+  outputSize: "standard",
   schemaVersion: 1,
   createdAt: now,
   updatedAt: now,
@@ -28,6 +29,10 @@ export const mockSettings: AppSettings = {
   customTextModel: "",
   customImageModel: "",
   customHeaders: "",
+  reasoningEnabled: false,
+  reasoningEffort: "medium",
+  responseVerbosity: "medium",
+  streamResponses: false,
   maxConcurrency: 3,
   defaultGridSize: 9,
   defaultAspectRatio: "1:1",
@@ -43,6 +48,8 @@ export const styleOptions = [
 export const aspectRatioOptions = ["1:1", "16:9", "9:16", "4:3"] as const;
 
 export const qualityOptions = ["draft", "standard", "high"] as const;
+
+export const outputSizeOptions = ["standard", "large", "2k", "4k"] as const;
 
 export const mockVisuals: MockVisual[] = [
   {
