@@ -22,6 +22,22 @@ export type TaskStatus =
 export type Project = {
   id: string;
   title: string;
+  projectDirectory?: string;
+  originalPrompt: string;
+  style: string;
+  gridSize: GridSize;
+  aspectRatio: AspectRatio;
+  quality: Quality;
+  outputSize: OutputSize;
+  schemaVersion: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type Conversation = {
+  id: string;
+  projectId: string;
+  title: string;
   originalPrompt: string;
   style: string;
   gridSize: GridSize;
@@ -36,6 +52,7 @@ export type Project = {
 export type ImageTask = {
   id: string;
   projectId: string;
+  conversationId?: string;
   parentTaskId?: string;
   explorationRound: number;
   index: number;
@@ -85,7 +102,12 @@ export type GridCell = ImageTask & {
 
 export type AppSnapshot = {
   project: Project;
+  conversation?: Conversation;
+  activeConversationId?: string;
+  projects?: Project[];
+  conversations?: Conversation[];
   tasks: GridCell[];
+  conversationTasks?: Record<string, GridCell[]>;
   settings: AppSettings;
   selectedTaskId?: string;
   currentRound: number;

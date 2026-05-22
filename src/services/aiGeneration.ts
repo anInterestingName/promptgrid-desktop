@@ -8,6 +8,11 @@ export type PromptDirection = {
   title: string;
 };
 
+export type PromptAnalysisResult = {
+  conversationTitle: string;
+  directions: PromptDirection[];
+};
+
 export type AnalyzePromptRequest = ProviderRuntime & {
   aspectRatio: string;
   gridSize: number;
@@ -43,7 +48,7 @@ type ProviderRuntime = {
 export async function analyzePromptDirections(
   project: Project,
   settings: AppSettings,
-): Promise<PromptDirection[]> {
+): Promise<PromptAnalysisResult> {
   const request = {
     ...buildProviderRuntime(settings),
     aspectRatio: project.aspectRatio,
@@ -56,10 +61,10 @@ export async function analyzePromptDirections(
   } satisfies AnalyzePromptRequest;
 
   if (isTauri()) {
-    return invoke<PromptDirection[]>("analyze_prompt_directions", { request });
+    return invoke<PromptAnalysisResult>("analyze_prompt_directions", { request });
   }
 
-  return requestDevAiProxy<PromptDirection[]>("analyze-prompts", request);
+  return requestDevAiProxy<PromptAnalysisResult>("analyze-prompts", request);
 }
 
 export async function generatePromptImage(

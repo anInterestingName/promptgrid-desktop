@@ -1,5 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import type { AppSnapshot } from "../types";
+import type { AppSnapshot, Conversation, GridCell, Project } from "../types";
 
 const FALLBACK_STORAGE_KEY = "promptgrid.workspace.snapshot.v1";
 const DEV_SECRET_PREFIX = "promptgrid.dev.api-key";
@@ -71,6 +71,37 @@ export async function pickDataDirectory(): Promise<string | null> {
   }
 
   return invoke<string | null>("pick_data_directory");
+}
+
+export async function saveGeneratedImage({
+  imageDataUrl,
+  project,
+  conversation,
+  task,
+}: {
+  imageDataUrl: string;
+  project: Project;
+  conversation: Conversation;
+  task: GridCell;
+}): Promise<string> {
+  if (!isTauri()) {
+    return imageDataUrl;
+  }
+
+  const result = await invoke<{ imagePath: string }>("save_generated_image", {
+    request: {
+      imageDataUrl,
+      projectId: project.id,
+      projectTitle: project.title,
+      projectDirectory: project.projectDirectory ?? null,
+      conversationId: conversation.id,
+      explorationRound: task.explorationRound,
+      cellIndex: task.index,
+      attempt: task.attempt,
+    },
+  });
+
+  return result.imagePath;
 }
 
 function sanitizeSnapshot(snapshot: AppSnapshot): AppSnapshot {

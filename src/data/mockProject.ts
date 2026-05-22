@@ -1,4 +1,10 @@
-import type { AppSettings, GridCell, MockVisual, Project } from "../types";
+import type {
+  AppSettings,
+  Conversation,
+  GridCell,
+  MockVisual,
+  Project,
+} from "../types";
 
 const now = new Date().toISOString();
 
@@ -15,6 +21,21 @@ export const mockProject: Project = {
   schemaVersion: 1,
   createdAt: now,
   updatedAt: now,
+};
+
+export const mockConversation: Conversation = {
+  id: "conversation-local-001",
+  projectId: mockProject.id,
+  title: "Initial Exploration",
+  originalPrompt: mockProject.originalPrompt,
+  style: mockProject.style,
+  gridSize: mockProject.gridSize,
+  aspectRatio: mockProject.aspectRatio,
+  quality: mockProject.quality,
+  outputSize: mockProject.outputSize,
+  schemaVersion: mockProject.schemaVersion,
+  createdAt: mockProject.createdAt,
+  updatedAt: mockProject.updatedAt,
 };
 
 export const mockSettings: AppSettings = {
@@ -104,7 +125,9 @@ export function createMockTasks(
   seedPrompt = project.originalPrompt,
   explorationRound = 1,
   parentTaskId?: string,
+  conversationId = "conversation-local-001",
 ): GridCell[] {
+  const createdAt = new Date().toISOString();
   const directions = [
     "hero composition with one dominant focal point",
     "top-down planning desk with layered artifacts",
@@ -120,6 +143,7 @@ export function createMockTasks(
   return directions.map((direction, index) => ({
     id: `round-${explorationRound}-cell-${index + 1}-${Date.now()}`,
     projectId: project.id,
+    conversationId,
     parentTaskId,
     explorationRound,
     index,
@@ -127,8 +151,8 @@ export function createMockTasks(
     status: "pending",
     provider: "mock-local",
     model: "mock-image-v1",
-    createdAt: now,
-    updatedAt: now,
+    createdAt,
+    updatedAt: createdAt,
     attempt: 1,
     visual: mockVisuals[index],
   }));

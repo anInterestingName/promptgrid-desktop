@@ -3,9 +3,9 @@ mod storage;
 
 use model_config::{
     GeneratedImage, ImageGenerateRequest, ModelFetchRequest, ModelOption, ModelTestRequest,
-    ModelTestResult, PromptAnalyzeRequest, PromptDirection,
+    ModelTestResult, PromptAnalysisResult, PromptAnalyzeRequest,
 };
-use storage::{AppSnapshot, LocalStore, StorageInfo};
+use storage::{AppSnapshot, LocalStore, SaveGeneratedImageRequest, SavedImage, StorageInfo};
 use tauri::{Manager, State};
 
 async fn run_blocking<T, F>(operation: F) -> Result<T, String>
@@ -78,13 +78,22 @@ async fn test_provider_connection(request: ModelTestRequest) -> Result<ModelTest
 #[tauri::command]
 async fn analyze_prompt_directions(
     request: PromptAnalyzeRequest,
-) -> Result<Vec<PromptDirection>, String> {
+) -> Result<PromptAnalysisResult, String> {
     run_blocking(move || model_config::analyze_prompt_directions(request)).await
 }
 
 #[tauri::command]
 async fn generate_prompt_image(request: ImageGenerateRequest) -> Result<GeneratedImage, String> {
     run_blocking(move || model_config::generate_prompt_image(request)).await
+}
+
+#[tauri::command]
+async fn save_generated_image(
+    store: State<'_, LocalStore>,
+    request: SaveGeneratedImageRequest,
+) -> Result<SavedImage, String> {
+    let store = store.inner().clone();
+    run_blocking(move || storage::save_generated_image(&store, request)).await
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -108,7 +117,8 @@ pub fn run() {
             fetch_provider_models,
             test_provider_connection,
             analyze_prompt_directions,
-            generate_prompt_image
+            generate_prompt_image,
+            save_generated_image
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

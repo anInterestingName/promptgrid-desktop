@@ -7,17 +7,33 @@ import {
 import { outputSizeLabels, qualityLabels, styleLabels, t } from "../i18n";
 import { usePromptGridStore } from "../state/usePromptGridStore";
 import type { AspectRatio, OutputSize, Quality } from "../types";
-import { Check, ChevronDown, Play, Sparkles, Wand2 } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  FolderOpen,
+  MessageSquare,
+  Play,
+  Sparkles,
+  Wand2,
+} from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 export function PromptPanel() {
   const locale = usePromptGridStore((state) => state.locale);
   const project = usePromptGridStore((state) => state.project);
+  const conversation = usePromptGridStore((state) => state.conversation);
+  const isConversationSaved = usePromptGridStore(
+    (state) => state.isConversationSaved,
+  );
+  const projects = usePromptGridStore((state) => state.projects);
   const settings = usePromptGridStore((state) => state.settings);
   const isAnalyzing = usePromptGridStore((state) => state.isAnalyzing);
   const isGenerating = usePromptGridStore((state) => state.isGenerating);
   const setOriginalPrompt = usePromptGridStore(
     (state) => state.setOriginalPrompt,
+  );
+  const startNewConversation = usePromptGridStore(
+    (state) => state.startNewConversation,
   );
   const setStyle = usePromptGridStore((state) => state.setStyle);
   const setAspectRatio = usePromptGridStore((state) => state.setAspectRatio);
@@ -49,6 +65,33 @@ export function PromptPanel() {
 
   return (
     <aside className="prompt-panel" aria-label={t(locale, "promptControls")}>
+      <section className="panel-section">
+        <label className="field-label icon-label" htmlFor="project-select">
+          <FolderOpen size={15} aria-hidden="true" />
+          {t(locale, "projectName")}
+        </label>
+        <select
+          id="project-select"
+          className="settings-input"
+          value={project.id}
+          disabled={isAnalyzing || isGenerating}
+          onChange={(event) => startNewConversation(event.target.value)}
+        >
+          {projects.map((projectItem) => (
+            <option key={projectItem.id} value={projectItem.id}>
+              {projectItem.title}
+            </option>
+          ))}
+        </select>
+        <div className="conversation-status">
+          <MessageSquare size={15} aria-hidden="true" />
+          <span>{t(locale, "conversationName")}</span>
+          <strong>
+            {isConversationSaved ? conversation.title : t(locale, "newConversation")}
+          </strong>
+        </div>
+      </section>
+
       <section className="panel-section">
         <div className="section-title">
           <Sparkles size={17} aria-hidden="true" />
@@ -196,7 +239,8 @@ export function PromptPanel() {
           className="secondary-action"
           type="button"
           onClick={generateImages}
-          disabled={isGenerating || isAnalyzing}
+          disabled={isGenerating || isAnalyzing || !isConversationSaved}
+          title={!isConversationSaved ? t(locale, "analyzeBeforeGenerate") : ""}
         >
           <Play size={18} aria-hidden="true" />
           {isGenerating ? t(locale, "generating") : t(locale, "generateImages")}

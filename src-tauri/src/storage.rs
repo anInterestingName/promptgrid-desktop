@@ -1,6 +1,7 @@
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -10,10 +11,29 @@ const SETTINGS_KEY: &str = "app_settings";
 const DATABASE_FILE_NAME: &str = "app.db";
 const STORAGE_CONFIG_FILE_NAME: &str = "storage-config.json";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
     id: String,
+    title: String,
+    project_directory: Option<String>,
+    original_prompt: String,
+    style: String,
+    grid_size: i64,
+    aspect_ratio: String,
+    quality: String,
+    #[serde(default = "default_output_size")]
+    output_size: String,
+    schema_version: i64,
+    created_at: String,
+    updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Conversation {
+    id: String,
+    project_id: String,
     title: String,
     original_prompt: String,
     style: String,
@@ -62,7 +82,7 @@ pub struct AppSettings {
     output_directory: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MockVisual {
     title: String,
@@ -70,11 +90,13 @@ pub struct MockVisual {
     texture: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GridCell {
     id: String,
     project_id: String,
+    #[serde(default)]
+    conversation_id: Option<String>,
     parent_task_id: Option<String>,
     exploration_round: i64,
     index: i64,
@@ -95,7 +117,17 @@ pub struct GridCell {
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
     project: Project,
+    #[serde(default)]
+    conversation: Option<Conversation>,
+    #[serde(default)]
+    active_conversation_id: Option<String>,
+    #[serde(default)]
+    projects: Vec<Project>,
+    #[serde(default)]
+    conversations: Vec<Conversation>,
     tasks: Vec<GridCell>,
+    #[serde(default)]
+    conversation_tasks: HashMap<String, Vec<GridCell>>,
     settings: AppSettings,
     selected_task_id: Option<String>,
     current_round: i64,
@@ -108,6 +140,25 @@ pub struct StorageInfo {
     current_data_dir: String,
     database_path: String,
     uses_custom_data_dir: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveGeneratedImageRequest {
+    image_data_url: String,
+    project_id: String,
+    project_title: String,
+    project_directory: Option<String>,
+    conversation_id: String,
+    exploration_round: i64,
+    cell_index: i64,
+    attempt: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedImage {
+    image_path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -267,7 +318,7 @@ pub fn pick_data_directory() -> Result<Option<String>, String> {
             .SetOptions(options)
             .map_err(|error| format!("Could not configure folder picker: {error}"))?;
 
-        let title = null_terminated_wide("选择数据存储文件夹");
+        let title = null_terminated_wide("选择文件夹");
         dialog
             .SetTitle(PCWSTR::from_raw(title.as_ptr()))
             .map_err(|error| format!("Could not set folder picker title: {error}"))?;
@@ -310,45 +361,132 @@ pub fn load_workspace(store: &LocalStore) -> Result<Option<AppSnapshot>, String>
         .lock()
         .map_err(|_| "Database lock is poisoned".to_string())?;
 
-    let project = connection
-        .query_row(
+    let mut project_statement = connection
+        .prepare(
             "
-            SELECT id, title, original_prompt, style, grid_size, aspect_ratio,
+            SELECT id, title, project_directory, original_prompt, style, grid_size, aspect_ratio,
                    quality, output_size, schema_version, created_at, updated_at
             FROM projects
             ORDER BY updated_at DESC
-            LIMIT 1
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+    let projects = project_statement
+        .query_map([], read_project)
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    if projects.is_empty() {
+        return Ok(None);
+    }
+
+    let app_state = connection
+        .query_row(
+            "
+            SELECT selected_project_id, selected_conversation_id, selected_task_id, current_round
+            FROM app_state
+            WHERE id = 1
             ",
             [],
-            read_project,
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
         )
         .optional()
         .map_err(|error| error.to_string())?;
 
-    let Some(project) = project else {
-        return Ok(None);
-    };
+    let (selected_project_id, selected_conversation_id, selected_task_id, current_round) =
+        app_state.unwrap_or((None, None, None, 1));
 
-    let mut statement = connection
+    let mut conversation_statement = connection
         .prepare(
             "
-            SELECT id, project_id, parent_task_id, exploration_round, cell_index,
+            SELECT id, project_id, title, original_prompt, style, grid_size,
+                   aspect_ratio, quality, output_size, schema_version,
+                   created_at, updated_at
+            FROM conversations
+            ORDER BY updated_at DESC
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+    let conversations = conversation_statement
+        .query_map([], read_conversation)
+        .map_err(|error| error.to_string())?;
+    let conversations = conversations
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    let project = selected_project_id
+        .as_deref()
+        .and_then(|project_id| projects.iter().find(|candidate| candidate.id == project_id))
+        .unwrap_or(&projects[0])
+        .clone();
+    let conversation = selected_conversation_id
+        .as_deref()
+        .and_then(|conversation_id| {
+            conversations.iter().find(|candidate| {
+                candidate.id == conversation_id && candidate.project_id == project.id
+            })
+        })
+        .or_else(|| {
+            conversations
+                .iter()
+                .filter(|candidate| candidate.project_id == project.id)
+                .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
+        })
+        .cloned();
+    let active_project = conversation
+        .as_ref()
+        .map(|conversation| merge_project_with_conversation(project.clone(), conversation))
+        .unwrap_or_else(|| project.clone());
+
+    let mut task_statement = connection
+        .prepare(
+            "
+            SELECT id, project_id, conversation_id, parent_task_id, exploration_round, cell_index,
                    prompt, direction_title, status, image_path, error_message, provider, model,
                    created_at, updated_at, attempt, visual_title, visual_palette,
                    visual_texture
             FROM image_tasks
-            WHERE project_id = ?1
-            ORDER BY exploration_round, cell_index
+            ORDER BY conversation_id, exploration_round, cell_index
             ",
         )
         .map_err(|error| error.to_string())?;
 
-    let task_rows = statement
-        .query_map(params![project.id.as_str()], read_task)
+    let task_rows = task_statement
+        .query_map([], read_task)
         .map_err(|error| error.to_string())?;
-    let tasks = task_rows
+    let all_tasks = task_rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
+    let mut conversation_tasks: HashMap<String, Vec<GridCell>> = HashMap::new();
+
+    for mut task in all_tasks {
+        let Some(conversation_id) = task.conversation_id.clone().or_else(|| {
+            conversation
+                .as_ref()
+                .map(|conversation| conversation.id.clone())
+        }) else {
+            continue;
+        };
+        task.conversation_id = Some(conversation_id.clone());
+        conversation_tasks
+            .entry(conversation_id)
+            .or_default()
+            .push(task);
+    }
+
+    let tasks = conversation
+        .as_ref()
+        .and_then(|conversation| conversation_tasks.get(&conversation.id))
+        .cloned()
+        .unwrap_or_default();
 
     let settings_json = connection
         .query_row(
@@ -380,25 +518,16 @@ pub fn load_workspace(store: &LocalStore) -> Result<Option<AppSnapshot>, String>
         )
         .map_err(|error| error.to_string())?;
 
-    let app_state = connection
-        .query_row(
-            "
-            SELECT selected_task_id, current_round
-            FROM app_state
-            WHERE id = 1
-            ",
-            [],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, i64>(1)?)),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?;
-
-    let (selected_task_id, current_round) =
-        app_state.unwrap_or((tasks.first().map(|task| task.id.clone()), 1));
-
     Ok(Some(AppSnapshot {
-        project,
+        project: active_project,
+        conversation: conversation.clone(),
+        active_conversation_id: conversation
+            .as_ref()
+            .map(|conversation| conversation.id.clone()),
+        projects,
+        conversations,
         tasks,
+        conversation_tasks,
         settings,
         selected_task_id,
         current_round,
@@ -408,13 +537,33 @@ pub fn load_workspace(store: &LocalStore) -> Result<Option<AppSnapshot>, String>
 pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), String> {
     let AppSnapshot {
         project,
+        conversation,
+        active_conversation_id,
+        mut projects,
+        mut conversations,
         tasks,
+        mut conversation_tasks,
         mut settings,
         selected_task_id,
         current_round,
     } = snapshot;
     migrate_legacy_api_keys(&mut settings)?;
     refresh_api_key_status(&mut settings);
+    upsert_project(&mut projects, project.clone());
+    if let Some(conversation) = conversation {
+        upsert_conversation(&mut conversations, conversation.clone());
+    }
+    let active_conversation_id = active_conversation_id.filter(|conversation_id| {
+        conversations
+            .iter()
+            .any(|conversation| conversation.id == *conversation_id)
+    });
+    if let Some(active_conversation_id) = active_conversation_id.as_ref() {
+        conversation_tasks.insert(active_conversation_id.clone(), tasks);
+    }
+    let project_files_projects = projects.clone();
+    let project_files_conversations = conversations.clone();
+    let project_files_tasks = conversation_tasks.clone();
 
     let mut connection = store
         .connection
@@ -423,92 +572,154 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
-    let project_id = project.id.clone();
     let now = project.updated_at.clone();
 
-    transaction
-        .execute(
-            "
-            INSERT INTO projects (
-                id, title, original_prompt, style, grid_size, aspect_ratio,
-                quality, output_size, schema_version, created_at, updated_at
+    for project in &projects {
+        transaction
+            .execute(
+                "
+                INSERT INTO projects (
+                    id, title, project_directory, original_prompt, style, grid_size, aspect_ratio,
+                    quality, output_size, schema_version, created_at, updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                ON CONFLICT(id) DO UPDATE SET
+                    title = excluded.title,
+                    project_directory = excluded.project_directory,
+                    original_prompt = excluded.original_prompt,
+                    style = excluded.style,
+                    grid_size = excluded.grid_size,
+                    aspect_ratio = excluded.aspect_ratio,
+                    quality = excluded.quality,
+                    output_size = excluded.output_size,
+                    schema_version = excluded.schema_version,
+                    updated_at = excluded.updated_at
+                ",
+                params![
+                    &project.id,
+                    &project.title,
+                    &project.project_directory,
+                    &project.original_prompt,
+                    &project.style,
+                    project.grid_size,
+                    &project.aspect_ratio,
+                    &project.quality,
+                    &project.output_size,
+                    project.schema_version,
+                    &project.created_at,
+                    &project.updated_at,
+                ],
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-            ON CONFLICT(id) DO UPDATE SET
-                title = excluded.title,
-                original_prompt = excluded.original_prompt,
-                style = excluded.style,
-                grid_size = excluded.grid_size,
-                aspect_ratio = excluded.aspect_ratio,
-                quality = excluded.quality,
-                output_size = excluded.output_size,
-                schema_version = excluded.schema_version,
-                updated_at = excluded.updated_at
-            ",
-            params![
-                &project.id,
-                &project.title,
-                &project.original_prompt,
-                &project.style,
-                project.grid_size,
-                &project.aspect_ratio,
-                &project.quality,
-                &project.output_size,
-                project.schema_version,
-                &project.created_at,
-                &project.updated_at,
-            ],
-        )
-        .map_err(|error| error.to_string())?;
+            .map_err(|error| error.to_string())?;
+    }
+
+    for conversation in &conversations {
+        transaction
+            .execute(
+                "
+                INSERT INTO conversations (
+                    id, project_id, title, original_prompt, style, grid_size,
+                    aspect_ratio, quality, output_size, schema_version,
+                    created_at, updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                ON CONFLICT(id) DO UPDATE SET
+                    project_id = excluded.project_id,
+                    title = excluded.title,
+                    original_prompt = excluded.original_prompt,
+                    style = excluded.style,
+                    grid_size = excluded.grid_size,
+                    aspect_ratio = excluded.aspect_ratio,
+                    quality = excluded.quality,
+                    output_size = excluded.output_size,
+                    schema_version = excluded.schema_version,
+                    updated_at = excluded.updated_at
+                ",
+                params![
+                    &conversation.id,
+                    &conversation.project_id,
+                    &conversation.title,
+                    &conversation.original_prompt,
+                    &conversation.style,
+                    conversation.grid_size,
+                    &conversation.aspect_ratio,
+                    &conversation.quality,
+                    &conversation.output_size,
+                    conversation.schema_version,
+                    &conversation.created_at,
+                    &conversation.updated_at,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
 
     transaction
-        .execute(
-            "DELETE FROM image_tasks WHERE project_id = ?1",
-            params![project_id],
-        )
+        .execute("DELETE FROM image_tasks", [])
         .map_err(|error| error.to_string())?;
+
+    let conversation_project_lookup = conversations
+        .iter()
+        .map(|conversation| (conversation.id.clone(), conversation.project_id.clone()))
+        .collect::<HashMap<_, _>>();
 
     {
         let mut task_insert = transaction
             .prepare(
                 "
                 INSERT INTO image_tasks (
-                    id, project_id, parent_task_id, exploration_round, cell_index,
+                    id, project_id, conversation_id, parent_task_id, exploration_round, cell_index,
                     prompt, direction_title, status, image_path, error_message, provider, model,
                     created_at, updated_at, attempt, visual_title, visual_palette,
                     visual_texture
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
                 ",
             )
             .map_err(|error| error.to_string())?;
 
-        for task in tasks {
-            let palette =
-                serde_json::to_string(&task.visual.palette).map_err(|error| error.to_string())?;
+        for (conversation_id, tasks) in conversation_tasks {
+            let Some(task_project_id) = conversation_project_lookup.get(&conversation_id).cloned()
+            else {
+                continue;
+            };
 
-            task_insert
-                .execute(params![
-                    task.id,
-                    task.project_id,
-                    task.parent_task_id,
-                    task.exploration_round,
-                    task.index,
-                    task.prompt,
-                    task.direction_title,
-                    task.status,
-                    task.image_path,
-                    task.error_message,
-                    task.provider,
-                    task.model,
-                    task.created_at,
-                    task.updated_at,
-                    task.attempt,
-                    task.visual.title,
-                    palette,
-                    task.visual.texture,
-                ])
-                .map_err(|error| error.to_string())?;
+            for mut task in tasks {
+                let palette = serde_json::to_string(&task.visual.palette)
+                    .map_err(|error| error.to_string())?;
+                let task_conversation_id = task
+                    .conversation_id
+                    .take()
+                    .unwrap_or_else(|| conversation_id.clone());
+                let task_project_id = if task.project_id.is_empty() {
+                    task_project_id.clone()
+                } else {
+                    task.project_id
+                };
+
+                task_insert
+                    .execute(params![
+                        task.id,
+                        task_project_id,
+                        task_conversation_id,
+                        task.parent_task_id,
+                        task.exploration_round,
+                        task.index,
+                        task.prompt,
+                        task.direction_title,
+                        task.status,
+                        task.image_path,
+                        task.error_message,
+                        task.provider,
+                        task.model,
+                        task.created_at,
+                        task.updated_at,
+                        task.attempt,
+                        task.visual.title,
+                        palette,
+                        task.visual.texture,
+                    ])
+                    .map_err(|error| error.to_string())?;
+            }
         }
     }
 
@@ -529,19 +740,201 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
     transaction
         .execute(
             "
-            INSERT INTO app_state (id, selected_project_id, selected_task_id, current_round, updated_at)
-            VALUES (1, ?1, ?2, ?3, ?4)
+            INSERT INTO app_state (
+                id, selected_project_id, selected_conversation_id,
+                selected_task_id, current_round, updated_at
+            )
+            VALUES (1, ?1, ?2, ?3, ?4, ?5)
             ON CONFLICT(id) DO UPDATE SET
                 selected_project_id = excluded.selected_project_id,
+                selected_conversation_id = excluded.selected_conversation_id,
                 selected_task_id = excluded.selected_task_id,
                 current_round = excluded.current_round,
                 updated_at = excluded.updated_at
             ",
-            params![&project.id, selected_task_id, current_round, now],
+            params![
+                &project.id,
+                active_conversation_id,
+                selected_task_id,
+                current_round,
+                now
+            ],
         )
         .map_err(|error| error.to_string())?;
 
-    transaction.commit().map_err(|error| error.to_string())
+    transaction.commit().map_err(|error| error.to_string())?;
+    sync_project_files(
+        store,
+        &project_files_projects,
+        &project_files_conversations,
+        &project_files_tasks,
+    )
+}
+
+pub fn save_generated_image(
+    store: &LocalStore,
+    request: SaveGeneratedImageRequest,
+) -> Result<SavedImage, String> {
+    let data_dir = store
+        .data_dir
+        .lock()
+        .map_err(|_| "Storage path lock is poisoned".to_string())?
+        .clone();
+    let project_directory = resolve_project_directory(
+        &data_dir,
+        &request.project_id,
+        &request.project_title,
+        request.project_directory.as_deref(),
+    )?;
+    let image_directory = project_directory
+        .join("conversations")
+        .join(sanitize_path_component(&request.conversation_id))
+        .join("images");
+    fs::create_dir_all(&image_directory)
+        .map_err(|error| format!("Could not create image folder: {error}"))?;
+
+    let (extension, bytes) = decode_image_data_url(&request.image_data_url)?;
+    let image_path = image_directory.join(format!(
+        "round-{round:03}-cell-{cell:03}-attempt-{attempt:03}.{extension}",
+        round = request.exploration_round.max(1),
+        cell = request.cell_index + 1,
+        attempt = request.attempt.max(1),
+    ));
+    fs::write(&image_path, bytes)
+        .map_err(|error| format!("Could not save generated image: {error}"))?;
+
+    Ok(SavedImage {
+        image_path: path_to_display_string(&image_path),
+    })
+}
+
+fn sync_project_files(
+    store: &LocalStore,
+    projects: &[Project],
+    conversations: &[Conversation],
+    conversation_tasks: &HashMap<String, Vec<GridCell>>,
+) -> Result<(), String> {
+    let data_dir = store
+        .data_dir
+        .lock()
+        .map_err(|_| "Storage path lock is poisoned".to_string())?
+        .clone();
+
+    for project in projects {
+        let project_directory = resolve_project_directory(
+            &data_dir,
+            &project.id,
+            &project.title,
+            project.project_directory.as_deref(),
+        )?;
+        fs::create_dir_all(&project_directory)
+            .map_err(|error| format!("Could not create project folder: {error}"))?;
+        write_json_file(&project_directory.join("project.json"), project)?;
+
+        for conversation in conversations
+            .iter()
+            .filter(|conversation| conversation.project_id == project.id)
+        {
+            let conversation_directory = project_directory
+                .join("conversations")
+                .join(sanitize_path_component(&conversation.id));
+            fs::create_dir_all(&conversation_directory)
+                .map_err(|error| format!("Could not create conversation folder: {error}"))?;
+            write_json_file(
+                &conversation_directory.join("conversation.json"),
+                conversation,
+            )?;
+            if let Some(tasks) = conversation_tasks.get(&conversation.id) {
+                write_json_file(&conversation_directory.join("tasks.json"), tasks)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(value)
+        .map_err(|error| format!("Could not serialize project file: {error}"))?;
+    fs::write(path, json).map_err(|error| {
+        format!(
+            "Could not write project file {}: {error}",
+            path_to_display_string(path)
+        )
+    })
+}
+
+fn resolve_project_directory(
+    data_dir: &Path,
+    project_id: &str,
+    project_title: &str,
+    project_directory: Option<&str>,
+) -> Result<PathBuf, String> {
+    if let Some(project_directory) = project_directory
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let path = PathBuf::from(project_directory);
+        if !path.is_absolute() {
+            return Err("Project folder must be an absolute path".to_string());
+        }
+        return Ok(path);
+    }
+
+    Ok(data_dir.join("projects").join(format!(
+        "{}-{}",
+        sanitize_path_component(project_title),
+        sanitize_path_component(project_id)
+    )))
+}
+
+fn decode_image_data_url(data_url: &str) -> Result<(&'static str, Vec<u8>), String> {
+    let Some((metadata, encoded)) = data_url.split_once(',') else {
+        return Err("Generated image was not a data URL".to_string());
+    };
+    if !metadata.contains(";base64") {
+        return Err("Generated image data URL is not base64 encoded".to_string());
+    }
+
+    let extension = if metadata.contains("image/jpeg") || metadata.contains("image/jpg") {
+        "jpg"
+    } else if metadata.contains("image/webp") {
+        "webp"
+    } else {
+        "png"
+    };
+
+    Ok((extension, decode_base64(encoded)?))
+}
+
+fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    let mut output = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buffer = 0u32;
+    let mut bits = 0u8;
+
+    for byte in input.bytes().filter(|byte| !byte.is_ascii_whitespace()) {
+        if byte == b'=' {
+            break;
+        }
+
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return Err("Generated image contains invalid base64 data".to_string()),
+        } as u32;
+
+        buffer = (buffer << 6) | value;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            output.push(((buffer >> bits) & 0xff) as u8);
+        }
+    }
+
+    Ok(output)
 }
 
 fn migrate(connection: &Connection) -> rusqlite::Result<()> {
@@ -552,6 +945,7 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS projects (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
+            project_directory TEXT,
             original_prompt TEXT NOT NULL,
             style TEXT NOT NULL,
             grid_size INTEGER NOT NULL,
@@ -563,9 +957,26 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS conversations (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            original_prompt TEXT NOT NULL,
+            style TEXT NOT NULL,
+            grid_size INTEGER NOT NULL,
+            aspect_ratio TEXT NOT NULL,
+            quality TEXT NOT NULL,
+            output_size TEXT NOT NULL DEFAULT 'standard',
+            schema_version INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS image_tasks (
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
+            conversation_id TEXT,
             parent_task_id TEXT,
             exploration_round INTEGER NOT NULL,
             cell_index INTEGER NOT NULL,
@@ -588,6 +999,9 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS idx_image_tasks_project_round
             ON image_tasks(project_id, exploration_round, cell_index);
 
+        CREATE INDEX IF NOT EXISTS idx_conversations_project_updated
+            ON conversations(project_id, updated_at DESC);
+
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL,
@@ -597,12 +1011,13 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         CREATE TABLE IF NOT EXISTS app_state (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             selected_project_id TEXT,
+            selected_conversation_id TEXT,
             selected_task_id TEXT,
             current_round INTEGER NOT NULL DEFAULT 1,
             updated_at TEXT NOT NULL
         );
 
-        PRAGMA user_version = 3;
+        PRAGMA user_version = 5;
         ",
     )?;
 
@@ -612,52 +1027,82 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "output_size",
         "TEXT NOT NULL DEFAULT 'standard'",
     )?;
+    ensure_column(connection, "projects", "project_directory", "TEXT")?;
     ensure_column(connection, "image_tasks", "direction_title", "TEXT")?;
-    connection.pragma_update(None, "user_version", 3)
+    ensure_column(connection, "image_tasks", "conversation_id", "TEXT")?;
+    ensure_column(connection, "app_state", "selected_conversation_id", "TEXT")?;
+    connection.execute(
+        "
+        CREATE INDEX IF NOT EXISTS idx_image_tasks_conversation_round
+            ON image_tasks(conversation_id, exploration_round, cell_index)
+        ",
+        [],
+    )?;
+    migrate_legacy_conversations(connection)?;
+    connection.pragma_update(None, "user_version", 5)
 }
 
 fn read_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     Ok(Project {
         id: row.get(0)?,
         title: row.get(1)?,
-        original_prompt: row.get(2)?,
-        style: row.get(3)?,
-        grid_size: row.get(4)?,
-        aspect_ratio: row.get(5)?,
-        quality: row.get(6)?,
-        output_size: row.get(7)?,
-        schema_version: row.get(8)?,
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        project_directory: row.get(2)?,
+        original_prompt: row.get(3)?,
+        style: row.get(4)?,
+        grid_size: row.get(5)?,
+        aspect_ratio: row.get(6)?,
+        quality: row.get(7)?,
+        output_size: row.get(8)?,
+        schema_version: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
+    })
+}
+
+fn read_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> {
+    Ok(Conversation {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        title: row.get(2)?,
+        original_prompt: row.get(3)?,
+        style: row.get(4)?,
+        grid_size: row.get(5)?,
+        aspect_ratio: row.get(6)?,
+        quality: row.get(7)?,
+        output_size: row.get(8)?,
+        schema_version: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
     })
 }
 
 fn read_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<GridCell> {
-    let palette_json: String = row.get(16)?;
+    let palette_json: String = row.get(17)?;
     let palette = serde_json::from_str::<[String; 3]>(&palette_json).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(16, Type::Text, Box::new(error))
+        rusqlite::Error::FromSqlConversionFailure(17, Type::Text, Box::new(error))
     })?;
 
     Ok(GridCell {
         id: row.get(0)?,
         project_id: row.get(1)?,
-        parent_task_id: row.get(2)?,
-        exploration_round: row.get(3)?,
-        index: row.get(4)?,
-        prompt: row.get(5)?,
-        direction_title: row.get(6)?,
-        status: row.get(7)?,
-        image_path: row.get(8)?,
-        error_message: row.get(9)?,
-        provider: row.get(10)?,
-        model: row.get(11)?,
-        created_at: row.get(12)?,
-        updated_at: row.get(13)?,
-        attempt: row.get(14)?,
+        conversation_id: row.get(2)?,
+        parent_task_id: row.get(3)?,
+        exploration_round: row.get(4)?,
+        index: row.get(5)?,
+        prompt: row.get(6)?,
+        direction_title: row.get(7)?,
+        status: row.get(8)?,
+        image_path: row.get(9)?,
+        error_message: row.get(10)?,
+        provider: row.get(11)?,
+        model: row.get(12)?,
+        created_at: row.get(13)?,
+        updated_at: row.get(14)?,
+        attempt: row.get(15)?,
         visual: MockVisual {
-            title: row.get(15)?,
+            title: row.get(16)?,
             palette,
-            texture: row.get(17)?,
+            texture: row.get(18)?,
         },
     })
 }
@@ -681,6 +1126,95 @@ fn ensure_column(
         [],
     )?;
     Ok(())
+}
+
+fn migrate_legacy_conversations(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute(
+        "
+        INSERT INTO conversations (
+            id, project_id, title, original_prompt, style, grid_size,
+            aspect_ratio, quality, output_size, schema_version,
+            created_at, updated_at
+        )
+        SELECT
+            'conversation-' || projects.id,
+            projects.id,
+            projects.title,
+            projects.original_prompt,
+            projects.style,
+            projects.grid_size,
+            projects.aspect_ratio,
+            projects.quality,
+            projects.output_size,
+            projects.schema_version,
+            projects.created_at,
+            projects.updated_at
+        FROM projects
+        WHERE EXISTS (
+            SELECT 1 FROM image_tasks
+            WHERE image_tasks.project_id = projects.id
+        )
+        AND NOT EXISTS (
+            SELECT 1 FROM conversations
+            WHERE conversations.project_id = projects.id
+        )
+        ",
+        [],
+    )?;
+    connection.execute(
+        "
+        UPDATE image_tasks
+        SET conversation_id = (
+            SELECT conversations.id
+            FROM conversations
+            WHERE conversations.project_id = image_tasks.project_id
+            ORDER BY conversations.updated_at DESC
+            LIMIT 1
+        )
+        WHERE conversation_id IS NULL OR conversation_id = ''
+        ",
+        [],
+    )?;
+    connection.execute(
+        "
+        UPDATE app_state
+        SET selected_conversation_id = (
+            SELECT conversations.id
+            FROM conversations
+            WHERE conversations.project_id = app_state.selected_project_id
+            ORDER BY conversations.updated_at DESC
+            LIMIT 1
+        )
+        WHERE selected_conversation_id IS NULL
+        ",
+        [],
+    )?;
+
+    Ok(())
+}
+
+fn merge_project_with_conversation(mut project: Project, conversation: &Conversation) -> Project {
+    project.original_prompt = conversation.original_prompt.clone();
+    project.style = conversation.style.clone();
+    project.grid_size = conversation.grid_size;
+    project.aspect_ratio = conversation.aspect_ratio.clone();
+    project.quality = conversation.quality.clone();
+    project.output_size = conversation.output_size.clone();
+    project.schema_version = conversation.schema_version;
+    if conversation.updated_at > project.updated_at {
+        project.updated_at = conversation.updated_at.clone();
+    }
+    project
+}
+
+fn upsert_project(projects: &mut Vec<Project>, project: Project) {
+    projects.retain(|candidate| candidate.id != project.id);
+    projects.insert(0, project);
+}
+
+fn upsert_conversation(conversations: &mut Vec<Conversation>, conversation: Conversation) {
+    conversations.retain(|candidate| candidate.id != conversation.id);
+    conversations.insert(0, conversation);
 }
 
 fn read_storage_config(
@@ -782,6 +1316,27 @@ fn path_to_sqlite_string(path: &Path) -> String {
 
 fn path_to_display_string(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn sanitize_path_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+
+    if sanitized.is_empty() {
+        "untitled".to_string()
+    } else {
+        sanitized
+    }
 }
 
 #[cfg(target_os = "windows")]

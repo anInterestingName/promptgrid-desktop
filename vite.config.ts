@@ -122,8 +122,8 @@ async function handleAnalyzePrompts(
   }
 
   const output = extractTextOutput(parseResponsesBody(responseText));
-  const directions = parsePromptDirections(output, gridSize);
-  sendJson(response, 200, directions);
+  const analysis = parsePromptDirections(output, gridSize);
+  sendJson(response, 200, analysis);
 }
 
 async function handleGenerateImage(
@@ -143,22 +143,17 @@ async function handleGenerateImage(
             model,
             input: requireField(body.prompt, "Image prompt"),
             tools: [
-              {
-                type: "image_generation",
-                quality: mapImageQuality(body.quality),
-                size: mapImageSize(
-                  body.aspectRatio,
-                  body.outputSize,
-                  body.imageModel,
-                  body.provider,
-                ),
-              },
+              buildImageGenerationTool(body),
             ],
             tool_choice: {
               type: "image_generation",
             },
           },
-          body,
+          {
+            ...body,
+            reasoningEnabled: false,
+            streamResponses: true,
+          },
         ),
       ),
     },
@@ -181,6 +176,25 @@ async function handleGenerateImage(
   sendJson(response, 200, {
     imageDataUrl: `data:image/png;base64,${imageBase64}`,
   });
+}
+
+function buildImageGenerationTool(request: DevProviderProxyRequest) {
+  const tool: Record<string, unknown> = {
+    type: "image_generation",
+    quality: mapImageQuality(request.quality),
+    size: mapImageSize(
+      request.aspectRatio,
+      request.outputSize,
+      request.imageModel,
+      request.provider,
+    ),
+  };
+
+  if (request.provider === "openai") {
+    tool.partial_images = 1;
+  }
+
+  return tool;
 }
 
 async function handleProviderModels(
@@ -303,7 +317,7 @@ async function handleImageModelTest(
               type: "image_generation",
             },
           },
-          body,
+          { ...body, streamResponses: false },
         ),
       ),
     },
@@ -358,9 +372,10 @@ function buildPromptAnalysisInput(
 ) {
   return [
     "You create image-generation prompt directions for a visual exploration grid.",
-    `Return exactly ${gridSize} distinct directions as strict JSON with this shape:`,
-    `{"directions":[{"title":"concise direction title","prompt":"full image generation prompt"}]}`,
+    `Return exactly ${gridSize} distinct directions and one short chat title as strict JSON with this shape:`,
+    `{"conversationTitle":"short title for this exploration","directions":[{"title":"concise direction title","prompt":"full image generation prompt"}]}`,
     "Do not include markdown, commentary, numbering, or extra keys.",
+    "The conversationTitle should summarize the original idea in 3 to 8 words and use the same language as the original idea.",
     "Each title should be 2 to 6 words, concrete, and in the same language as the original idea.",
     `Original idea: ${requireField(request.originalPrompt, "Original prompt")}`,
     `Visual style: ${request.style || "Editorial product study"}`,
@@ -373,6 +388,7 @@ function buildPromptAnalysisInput(
 
 function parsePromptDirections(output: string, gridSize: number) {
   const parsed = parseJsonFromText(output) as {
+    conversationTitle?: unknown;
     directions?: Array<{ prompt?: unknown; title?: unknown }>;
   };
   const directions = Array.isArray(parsed.directions) ? parsed.directions : [];
@@ -395,7 +411,15 @@ function parsePromptDirections(output: string, gridSize: number) {
     throw new Error("Prompt analysis returned no directions");
   }
 
-  return promptDirections;
+  const conversationTitle =
+    typeof parsed.conversationTitle === "string"
+      ? parsed.conversationTitle.trim()
+      : "";
+
+  return {
+    conversationTitle: conversationTitle || promptDirections[0]?.title || "Untitled Chat",
+    directions: promptDirections,
+  };
 }
 
 function parseJsonFromText(output: string) {
@@ -643,14 +667,9 @@ function parseResponsesStream(responseText: string) {
   let outputText = "";
   const output: unknown[] = [];
 
-  for (const line of responseText.split(/\r?\n/)) {
-    const trimmedLine = line.trim();
-    if (!trimmedLine.startsWith("data:")) {
-      continue;
-    }
-
-    const data = trimmedLine.slice("data:".length).trim();
-    if (!data || data === "[DONE]") {
+  for (const data of readResponseStreamEvents(responseText)) {
+    const trimmedData = data.trim();
+    if (!trimmedData || trimmedData === "[DONE]") {
       continue;
     }
 
@@ -662,7 +681,7 @@ function parseResponsesStream(responseText: string) {
       type?: unknown;
     };
     try {
-      event = JSON.parse(data);
+      event = JSON.parse(trimmedData);
     } catch {
       continue;
     }
@@ -678,14 +697,23 @@ function parseResponsesStream(responseText: string) {
 
     if (
       typeof event.type === "string" &&
-      event.type.includes("image_generation_call")
+      (event.type.includes("image_generation_call") ||
+        event.type === "response.output_item.done")
     ) {
       if (typeof event.result === "string") {
         output.push({
           type: "image_generation_call",
           result: event.result,
         });
-      } else if (event.item) {
+      } else if (hasEventItemResult(event.item)) {
+        output.push({
+          type: "image_generation_call",
+          result: event.item.result,
+        });
+      } else if (
+        event.type !== "response.image_generation_call.partial_image" &&
+        event.item
+      ) {
         output.push(event.item);
       }
     }
@@ -695,6 +723,42 @@ function parseResponsesStream(responseText: string) {
     output_text: outputText,
     output,
   };
+}
+
+function readResponseStreamEvents(responseText: string) {
+  const events: string[] = [];
+  let eventDataLines: string[] = [];
+
+  for (const line of responseText.split(/\r?\n/)) {
+    const trimmedLine = line.trimEnd();
+    if (!trimmedLine) {
+      if (eventDataLines.length > 0) {
+        events.push(eventDataLines.join("\n"));
+        eventDataLines = [];
+      }
+      continue;
+    }
+
+    const trimmedStart = trimmedLine.trimStart();
+    if (trimmedStart.startsWith("data:")) {
+      eventDataLines.push(trimmedStart.slice("data:".length).trimStart());
+    }
+  }
+
+  if (eventDataLines.length > 0) {
+    events.push(eventDataLines.join("\n"));
+  }
+
+  return events;
+}
+
+function hasEventItemResult(item: unknown): item is { result: string } {
+  return (
+    Boolean(item) &&
+    typeof item === "object" &&
+    typeof (item as { result?: unknown }).result === "string" &&
+    Boolean((item as { result: string }).result.trim())
+  );
 }
 
 function extractChatCompletionOutput(responseJson: unknown) {

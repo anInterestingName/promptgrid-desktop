@@ -1,4 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
+import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import {
   Download,
   Maximize2,
@@ -7,7 +8,7 @@ import {
   SplitSquareVertical,
   X,
 } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, type CSSProperties } from "react";
 import { statusLabels, t, type Locale } from "../i18n";
 import { usePromptGridStore } from "../state/usePromptGridStore";
 import type { GridCell } from "../types";
@@ -228,12 +229,13 @@ function MockImage({
   task: GridCell;
   large?: boolean;
 }) {
-  if (task.imagePath?.startsWith("data:image/")) {
+  const imageSource = getImageSource(task.imagePath);
+  if (imageSource) {
     return (
       <img
         alt={task.prompt}
         className={`generated-image${large ? " large" : ""}`}
-        src={task.imagePath}
+        src={imageSource}
       />
     );
   }
@@ -243,7 +245,7 @@ function MockImage({
     "--tone-a": toneA,
     "--tone-b": toneB,
     "--tone-c": toneC,
-  } as React.CSSProperties;
+  } as CSSProperties;
 
   return (
     <div
@@ -257,4 +259,16 @@ function MockImage({
       <div className="mock-plane accent" />
     </div>
   );
+}
+
+function getImageSource(imagePath?: string) {
+  if (!imagePath) {
+    return undefined;
+  }
+
+  if (imagePath.startsWith("data:image/")) {
+    return imagePath;
+  }
+
+  return isTauri() ? convertFileSrc(imagePath) : imagePath;
 }

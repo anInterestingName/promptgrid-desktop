@@ -11,15 +11,28 @@ export function TopBar() {
   const setColorTheme = usePromptGridStore((state) => state.setColorTheme);
   const currentRound = usePromptGridStore((state) => state.currentRound);
   const activeSection = usePromptGridStore((state) => state.activeSection);
+  const project = usePromptGridStore((state) => state.project);
+  const conversation = usePromptGridStore((state) => state.conversation);
+  const isConversationSaved = usePromptGridStore(
+    (state) => state.isConversationSaved,
+  );
   const eyebrowKey =
     activeSection === "settings" ? "localConfiguration" : "localProject";
-  const titleKey = activeSection === "settings" ? "settingsTitle" : "projectTitle";
+  const title =
+    activeSection === "settings"
+      ? t(locale, "settingsTitle")
+      : project.title;
 
   return (
     <header className="topbar">
       <div>
         <p className="eyebrow">{t(locale, eyebrowKey)}</p>
-        <h1>{t(locale, titleKey)}</h1>
+        <h1>{title}</h1>
+        {activeSection === "projects" ? (
+          <p className="topbar-subtitle">
+            {isConversationSaved ? conversation.title : t(locale, "newConversation")}
+          </p>
+        ) : null}
       </div>
       <div className="topbar-actions">
         <div className="toolbar-control">

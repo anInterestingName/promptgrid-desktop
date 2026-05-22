@@ -1,8 +1,12 @@
 use keyring::{Entry, Error as KeyringError};
-use reqwest::blocking::Client;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
+use reqwest::blocking::{Client, Response};
+use reqwest::header::{
+    HeaderMap, HeaderName, HeaderValue, ACCEPT_ENCODING, AUTHORIZATION, CONTENT_ENCODING,
+    CONTENT_TYPE,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::io::{BufRead, BufReader};
 use std::time::Duration;
 
 const SECRET_SERVICE: &str = "PromptGrid Desktop";
@@ -60,6 +64,13 @@ pub struct PromptDirection {
     prompt: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptAnalysisResult {
+    conversation_title: String,
+    directions: Vec<PromptDirection>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageGenerateRequest {
@@ -72,12 +83,7 @@ pub struct ImageGenerateRequest {
     quality: String,
     #[serde(default = "default_output_size")]
     output_size: String,
-    #[serde(default)]
-    reasoning_enabled: bool,
-    reasoning_effort: Option<String>,
     response_verbosity: Option<String>,
-    #[serde(default)]
-    stream_responses: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,6 +162,7 @@ pub fn fetch_provider_models(request: ModelFetchRequest) -> Result<Vec<ModelOpti
 
     headers.insert(AUTHORIZATION, auth_value);
     apply_custom_headers(&mut headers, request.custom_headers.as_deref())?;
+    apply_default_provider_headers(&mut headers);
 
     let client = Client::builder()
         .timeout(Duration::from_secs(20))
@@ -208,6 +215,7 @@ pub fn test_provider_connection(request: ModelTestRequest) -> Result<ModelTestRe
 
     headers.insert(AUTHORIZATION, auth_value);
     apply_custom_headers(&mut headers, request.custom_headers.as_deref())?;
+    apply_default_provider_headers(&mut headers);
 
     let client = Client::builder()
         .timeout(Duration::from_secs(30))
@@ -222,7 +230,7 @@ pub fn test_provider_connection(request: ModelTestRequest) -> Result<ModelTestRe
 
 pub fn analyze_prompt_directions(
     request: PromptAnalyzeRequest,
-) -> Result<Vec<PromptDirection>, String> {
+) -> Result<PromptAnalysisResult, String> {
     let api_key = get_provider_api_key(&request.provider)?
         .ok_or_else(|| "API key is not saved for this provider".to_string())?;
     let model = request.text_model.trim();
@@ -236,6 +244,7 @@ pub fn analyze_prompt_directions(
         .map_err(|error| format!("Invalid API key header: {error}"))?;
     headers.insert(AUTHORIZATION, auth_value);
     apply_custom_headers(&mut headers, request.custom_headers.as_deref())?;
+    apply_default_provider_headers(&mut headers);
 
     let client = Client::builder()
         .timeout(Duration::from_secs(60))
@@ -261,9 +270,7 @@ pub fn analyze_prompt_directions(
         .send()
         .map_err(|error| format!("Could not analyze prompt directions: {error}"))?;
     let status = response.status();
-    let response_text = response
-        .text()
-        .map_err(|error| format!("Could not read prompt analysis response: {error}"))?;
+    let response_text = read_response_text(response, "prompt analysis response")?;
 
     if !status.is_success() {
         return Err(format!(
@@ -299,6 +306,7 @@ pub fn generate_prompt_image(request: ImageGenerateRequest) -> Result<GeneratedI
         .map_err(|error| format!("Invalid API key header: {error}"))?;
     headers.insert(AUTHORIZATION, auth_value);
     apply_custom_headers(&mut headers, request.custom_headers.as_deref())?;
+    apply_default_provider_headers(&mut headers);
 
     let client = Client::builder()
         .timeout(Duration::from_secs(120))
@@ -308,16 +316,13 @@ pub fn generate_prompt_image(request: ImageGenerateRequest) -> Result<GeneratedI
         "model": model,
         "input": prompt,
         "tools": [
-            {
-                "type": "image_generation",
-                "quality": map_image_quality(&request.quality),
-                "size": map_image_size(
-                    &request.aspect_ratio,
-                    &request.output_size,
-                    model,
-                    &request.provider
-                )
-            }
+            build_image_generation_tool(
+                &request.aspect_ratio,
+                &request.output_size,
+                model,
+                &request.provider,
+                Some(&request.quality)
+            )
         ],
         "tool_choice": {
             "type": "image_generation"
@@ -325,10 +330,10 @@ pub fn generate_prompt_image(request: ImageGenerateRequest) -> Result<GeneratedI
     });
     apply_response_runtime_parameters(
         &mut body,
-        request.reasoning_enabled,
-        request.reasoning_effort.as_deref(),
+        false,
+        None,
         request.response_verbosity.as_deref(),
-        request.stream_responses,
+        true,
     );
 
     let response = client
@@ -338,10 +343,28 @@ pub fn generate_prompt_image(request: ImageGenerateRequest) -> Result<GeneratedI
         .send()
         .map_err(|error| format!("Could not generate image: {error}"))?;
     let status = response.status();
-    let response_text = response
-        .text()
-        .map_err(|error| format!("Could not read image generation response: {error}"))?;
+    let content_type = header_value(response.headers(), CONTENT_TYPE);
 
+    if content_type
+        .as_deref()
+        .map(is_event_stream_content_type)
+        .unwrap_or(false)
+    {
+        if !status.is_success() {
+            let response_text = read_response_text(response, "image generation response")?;
+            return Err(format!(
+                "Image generation failed with HTTP {status}: {}",
+                summarize_response_error(&response_text)
+            ));
+        }
+
+        let image_base64 = read_image_generation_stream(response)?;
+        return Ok(GeneratedImage {
+            image_data_url: format!("data:image/png;base64,{image_base64}"),
+        });
+    }
+
+    let response_text = read_response_text(response, "image generation response")?;
     if !status.is_success() {
         return Err(format!(
             "Image generation failed with HTTP {status}: {}",
@@ -385,9 +408,7 @@ fn test_text_model(
         .send()
         .map_err(|error| format!("Could not test model connection: {error}"))?;
     let status = response.status();
-    let response_text = response
-        .text()
-        .map_err(|error| format!("Could not read model test response: {error}"))?;
+    let response_text = read_response_text(response, "model test response")?;
 
     if !status.is_success() {
         return Err(format!(
@@ -432,7 +453,7 @@ fn test_image_model(
         request.reasoning_enabled,
         request.reasoning_effort.as_deref(),
         request.response_verbosity.as_deref(),
-        request.stream_responses,
+        false,
     );
     let response = client
         .post(responses_url)
@@ -441,9 +462,7 @@ fn test_image_model(
         .send()
         .map_err(|error| format!("Could not test image model connection: {error}"))?;
     let status = response.status();
-    let response_text = response
-        .text()
-        .map_err(|error| format!("Could not read image model test response: {error}"))?;
+    let response_text = read_response_text(response, "image model test response")?;
 
     if !status.is_success() {
         return Err(format!(
@@ -513,6 +532,29 @@ fn apply_response_runtime_parameters(
     if stream_responses {
         body_object.insert("stream".to_string(), Value::Bool(true));
     }
+}
+
+fn build_image_generation_tool(
+    aspect_ratio: &str,
+    output_size: &str,
+    model: &str,
+    provider: &str,
+    quality: Option<&str>,
+) -> Value {
+    let mut tool = json!({
+        "type": "image_generation",
+        "size": map_image_size(aspect_ratio, output_size, model, provider)
+    });
+
+    if let Some(quality) = quality {
+        tool["quality"] = json!(map_image_quality(quality));
+    }
+
+    if provider == "openai" {
+        tool["partial_images"] = json!(1);
+    }
+
+    tool
 }
 
 fn provider_entry(provider: &str) -> Result<Entry, String> {
@@ -594,6 +636,220 @@ fn apply_custom_headers(
     }
 
     Ok(())
+}
+
+fn apply_default_provider_headers(headers: &mut HeaderMap) {
+    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+}
+
+fn read_response_text(response: Response, label: &str) -> Result<String, String> {
+    let content_type = header_value(response.headers(), CONTENT_TYPE);
+    let content_encoding = header_value(response.headers(), CONTENT_ENCODING);
+    let response_context = match (content_type.as_deref(), content_encoding.as_deref()) {
+        (Some(content_type), Some(content_encoding)) => {
+            format!(" (content-type: {content_type}, content-encoding: {content_encoding})")
+        }
+        (Some(content_type), None) => format!(" (content-type: {content_type})"),
+        (None, Some(content_encoding)) => {
+            format!(" (content-encoding: {content_encoding})")
+        }
+        (None, None) => String::new(),
+    };
+
+    if content_type
+        .as_deref()
+        .map(is_event_stream_content_type)
+        .unwrap_or(false)
+    {
+        return read_event_stream_text(response, label, &response_context);
+    }
+
+    response
+        .bytes()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .map_err(|error| format!("Could not read {label}: {error}{response_context}"))
+}
+
+fn is_event_stream_content_type(value: &str) -> bool {
+    value.to_ascii_lowercase().contains("text/event-stream")
+}
+
+fn read_image_generation_stream(response: Response) -> Result<String, String> {
+    let mut reader = BufReader::new(response);
+    let mut line = String::new();
+    let mut data_lines = Vec::new();
+    let mut fallback_image_base64: Option<String> = None;
+
+    loop {
+        line.clear();
+        let byte_count = reader
+            .read_line(&mut line)
+            .map_err(|error| format!("Could not read image generation stream: {error}"))?;
+
+        if byte_count == 0 {
+            break;
+        }
+
+        let trimmed_line = line.trim_end_matches(['\r', '\n']);
+        if trimmed_line.is_empty() {
+            match process_image_stream_event(&data_lines)? {
+                ImageStreamEvent::Image(result) => return Ok(result),
+                ImageStreamEvent::FallbackImage(result) => {
+                    fallback_image_base64 = Some(result);
+                }
+                ImageStreamEvent::Done => break,
+                ImageStreamEvent::Continue => {}
+            }
+            data_lines.clear();
+            continue;
+        }
+
+        if let Some(data) = trimmed_line.trim().strip_prefix("data:") {
+            data_lines.push(data.trim_start().to_string());
+        }
+    }
+
+    if !data_lines.is_empty() {
+        match process_image_stream_event(&data_lines)? {
+            ImageStreamEvent::Image(result) => return Ok(result),
+            ImageStreamEvent::FallbackImage(result) => {
+                fallback_image_base64 = Some(result);
+            }
+            ImageStreamEvent::Done | ImageStreamEvent::Continue => {}
+        }
+    }
+
+    fallback_image_base64
+        .ok_or_else(|| "Image generation stream ended without a final image output".to_string())
+}
+
+enum ImageStreamEvent {
+    Image(String),
+    FallbackImage(String),
+    Done,
+    Continue,
+}
+
+fn process_image_stream_event(data_lines: &[String]) -> Result<ImageStreamEvent, String> {
+    if data_lines.is_empty() {
+        return Ok(ImageStreamEvent::Continue);
+    }
+
+    let data = data_lines.join("\n");
+    if data.trim() == "[DONE]" {
+        return Ok(ImageStreamEvent::Done);
+    }
+
+    let event = match serde_json::from_str::<Value>(&data) {
+        Ok(event) => event,
+        Err(_) if data.contains("\"partial_image\"") => {
+            return Ok(ImageStreamEvent::Continue);
+        }
+        Err(error) => {
+            return Err(format!("Could not parse image generation stream event: {error}"));
+        }
+    };
+
+    let event_type = event.get("type").and_then(Value::as_str).unwrap_or_default();
+    if event_type == "response.image_generation_call.partial_image" {
+        return Ok(ImageStreamEvent::Continue);
+    }
+
+    if event_type == "response.image_generation_call.completed" {
+        if let Some(result) = extract_image_result_from_event(&event) {
+            return Ok(ImageStreamEvent::Image(result));
+        }
+    }
+
+    if event_type == "response.output_item.done" {
+        if let Some(result) = extract_image_result_from_event(&event) {
+            return Ok(ImageStreamEvent::Image(result));
+        }
+    }
+
+    if event_type == "response.completed" {
+        if let Some(response) = event.get("response") {
+            if let Some(result) = extract_image_base64(response) {
+                return Ok(ImageStreamEvent::Image(result));
+            }
+        }
+    }
+
+    if let Some(result) = extract_image_result_from_event(&event) {
+        if event_type.contains("image_generation_call") {
+            return Ok(ImageStreamEvent::FallbackImage(result));
+        }
+    }
+
+    Ok(ImageStreamEvent::Continue)
+}
+
+fn extract_image_result_from_event(event: &Value) -> Option<String> {
+    event
+        .get("result")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            event
+                .get("item")
+                .and_then(|item| item.get("result"))
+                .and_then(Value::as_str)
+        })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn read_event_stream_text(
+    response: Response,
+    label: &str,
+    response_context: &str,
+) -> Result<String, String> {
+    let mut reader = BufReader::new(response);
+    let mut response_text = String::new();
+    let mut line = String::new();
+
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+                let trimmed_line = line.trim_end_matches(['\r', '\n']);
+                response_text.push_str(trimmed_line);
+                response_text.push('\n');
+
+                if event_stream_is_complete(trimmed_line) {
+                    break;
+                }
+            }
+            Err(error) => {
+                if response_text.lines().any(event_stream_is_complete) {
+                    return Ok(response_text);
+                }
+
+                return Err(format!("Could not read {label}: {error}{response_context}"));
+            }
+        }
+    }
+
+    Ok(response_text)
+}
+
+fn event_stream_is_complete(line: &str) -> bool {
+    let Some(data) = line.trim().strip_prefix("data:") else {
+        return false;
+    };
+    let data = data.trim();
+
+    data == "[DONE]"
+        || data.contains("\"type\":\"response.completed\"")
+        || data.contains("\"type\": \"response.completed\"")
+}
+
+fn header_value(headers: &HeaderMap, name: HeaderName) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
 }
 
 fn extract_text_output(response_json: &Value) -> Option<String> {
@@ -690,9 +946,10 @@ fn parse_responses_api_body(response_text: &str) -> Result<Value, serde_json::Er
 fn build_prompt_analysis_input(request: &PromptAnalyzeRequest, grid_size: usize) -> String {
     [
         "You create image-generation prompt directions for a visual exploration grid.".to_string(),
-        format!("Return exactly {grid_size} distinct directions as strict JSON with this shape:"),
-        "{\"directions\":[{\"title\":\"concise direction title\",\"prompt\":\"full image generation prompt\"}]}".to_string(),
+        format!("Return exactly {grid_size} distinct directions and one short chat title as strict JSON with this shape:"),
+        "{\"conversationTitle\":\"short title for this exploration\",\"directions\":[{\"title\":\"concise direction title\",\"prompt\":\"full image generation prompt\"}]}".to_string(),
         "Do not include markdown, commentary, numbering, or extra keys.".to_string(),
+        "The conversationTitle should summarize the original idea in 3 to 8 words and use the same language as the original idea.".to_string(),
         "Each title should be 2 to 6 words, concrete, and in the same language as the original idea."
             .to_string(),
         format!("Original idea: {}", request.original_prompt.trim()),
@@ -706,7 +963,7 @@ fn build_prompt_analysis_input(request: &PromptAnalyzeRequest, grid_size: usize)
     .join("\n")
 }
 
-fn parse_prompt_directions(output: &str, grid_size: usize) -> Result<Vec<PromptDirection>, String> {
+fn parse_prompt_directions(output: &str, grid_size: usize) -> Result<PromptAnalysisResult, String> {
     let json = parse_json_from_text(output)
         .map_err(|error| format!("Prompt analysis did not return valid JSON: {error}"))?;
     let directions = json
@@ -742,7 +999,18 @@ fn parse_prompt_directions(output: &str, grid_size: usize) -> Result<Vec<PromptD
         return Err("Prompt analysis returned no directions".to_string());
     }
 
-    Ok(prompts)
+    let conversation_title = json
+        .get("conversationTitle")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| prompts[0].title.clone());
+
+    Ok(PromptAnalysisResult {
+        conversation_title,
+        directions: prompts,
+    })
 }
 
 fn parse_json_from_text(output: &str) -> Result<Value, serde_json::Error> {
