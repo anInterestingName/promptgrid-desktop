@@ -2,13 +2,15 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {
   FolderOpen,
   Grid3X3,
+  MoreHorizontal,
   Plus,
   Settings2,
   X,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { t, type Locale, type MessageKey } from "../i18n";
-import { pickDataDirectory } from "../services/localPersistence";
+import { openProjectFolder, pickDataDirectory } from "../services/localPersistence";
+import { getErrorMessage } from "../shared/utils/error";
 import { usePromptGridStore } from "../state/usePromptGridStore";
 import type { Conversation, Project } from "../types";
 
@@ -20,6 +22,42 @@ const navItems: Array<{
   { label: "projects", icon: FolderOpen, section: "projects" },
   { label: "settings", icon: Settings2, section: "settings" },
 ];
+
+const projectContextMenuWidth = 172;
+const projectContextMenuHeight = 136;
+const projectContextMenuGap = 6;
+
+function getProjectMenuPosition({
+  preferredX,
+  preferredY,
+  boundaryRight,
+  fallbackRight,
+}: {
+  preferredX: number;
+  preferredY: number;
+  boundaryRight: number;
+  fallbackRight?: number;
+}) {
+  const hasRightSpace =
+    preferredX + projectContextMenuWidth + projectContextMenuGap <= boundaryRight;
+  const hasLeftSpace =
+    preferredX - projectContextMenuWidth - projectContextMenuGap >= 0;
+  const x = hasRightSpace
+    ? preferredX
+    : hasLeftSpace
+      ? (fallbackRight ?? preferredX) - projectContextMenuWidth
+      : Math.max(projectContextMenuGap, boundaryRight - projectContextMenuWidth);
+  const y =
+    preferredY + projectContextMenuHeight + projectContextMenuGap <=
+    window.innerHeight
+      ? preferredY
+      : Math.max(
+          projectContextMenuGap,
+          window.innerHeight - projectContextMenuHeight - projectContextMenuGap,
+        );
+
+  return { x, y };
+}
 
 export function ProjectSidebar() {
   const locale = usePromptGridStore((state) => state.locale);
@@ -38,17 +76,29 @@ export function ProjectSidebar() {
   );
   const openProject = usePromptGridStore((state) => state.openProject);
   const openConversation = usePromptGridStore((state) => state.openConversation);
+  const renameProject = usePromptGridStore((state) => state.renameProject);
+  const removeProject = usePromptGridStore((state) => state.removeProject);
   const currentRound = usePromptGridStore((state) => state.currentRound);
   const completedCount = usePromptGridStore(
     (state) => state.tasks.filter((task) => task.status === "completed").length,
   );
   const [isProjectDialogOpen, setIsProjectDialogOpen] = useState(false);
+  const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [openProjectMenu, setOpenProjectMenu] = useState<{
+    projectId: string;
+    x?: number;
+    y?: number;
+  }>();
+  const [renamingProject, setRenamingProject] = useState<Project>();
+  const [projectFolderError, setProjectFolderError] = useState("");
 
   const projectTree = useMemo(
     () =>
-      sortByUpdatedAt(projects).map((item) => ({
+      sortByCreatedAt(projects).map((item) => ({
         project: item,
-        conversations: sortByUpdatedAt(
+        conversations: sortByCreatedAt(
           conversations.filter(
             (candidate) => candidate.projectId === item.id,
           ),
@@ -57,9 +107,53 @@ export function ProjectSidebar() {
     [conversations, projects],
   );
   const recentConversations = useMemo(
-    () => sortByUpdatedAt(conversations).slice(0, 4),
+    () => sortByCreatedAt(conversations).slice(0, 4),
     [conversations],
   );
+
+  useEffect(() => {
+    if (!openProjectMenu) {
+      return;
+    }
+
+    function closeProjectMenu(event: PointerEvent) {
+      if (!(event.target as Element).closest(".project-tree-menu-shell")) {
+        setOpenProjectMenu(undefined);
+      }
+    }
+
+    document.addEventListener("pointerdown", closeProjectMenu, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeProjectMenu, true);
+    };
+  }, [openProjectMenu]);
+
+  function toggleProject(projectId: string) {
+    setCollapsedProjectIds((current) => {
+      const next = new Set(current);
+      if (next.has(projectId)) {
+        next.delete(projectId);
+      } else {
+        next.add(projectId);
+      }
+      return next;
+    });
+  }
+
+  function handleOpenProjectFolder(projectItem: Project) {
+    void openProjectFolder(projectItem)
+      .then(() => setProjectFolderError(""))
+      .catch((error) => {
+        const errorMessage = getErrorMessage(error);
+        const message = errorMessage.includes("desktop app")
+          ? t(locale, "openProjectFolderDesktopOnly")
+          : errorMessage.includes("not found")
+            ? t(locale, "openProjectFolderRestartRequired")
+            : `${t(locale, "openProjectFolderError")}: ${errorMessage}`;
+        setProjectFolderError(message);
+        console.error("Could not open project folder", error);
+      });
+  }
 
   return (
     <aside className="sidebar" aria-label={t(locale, "projectNavigation")}>
@@ -111,40 +205,85 @@ export function ProjectSidebar() {
         <div className="project-tree">
           {projectTree.map((item) => (
             <div className="project-tree-group" key={item.project.id}>
-              <div className="project-tree-row">
+              <div
+                className="project-tree-row"
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  const rowRect = event.currentTarget.getBoundingClientRect();
+                  const sidebarRight =
+                    event.currentTarget.closest(".sidebar")?.getBoundingClientRect()
+                      .right ?? window.innerWidth;
+                  setOpenProjectMenu({
+                    projectId: item.project.id,
+                    ...getProjectMenuPosition({
+                      preferredX: event.clientX,
+                      preferredY: rowRect.bottom + projectContextMenuGap,
+                      boundaryRight: sidebarRight,
+                    }),
+                  });
+                }}
+              >
                 <ProjectButton
+                  isCollapsed={collapsedProjectIds.has(item.project.id)}
                   isActive={item.project.id === project.id}
                   item={item.project}
-                  onOpen={() => openProject(item.project.id)}
+                  onToggle={() => toggleProject(item.project.id)}
                 />
-                <button
-                  className="project-inline-action"
-                  type="button"
-                  title={t(locale, "newConversation")}
-                  onClick={() => startNewConversation(item.project.id)}
-                >
-                  <Plus size={15} aria-hidden="true" />
-                </button>
+                <ProjectMenu
+                  isOpen={openProjectMenu?.projectId === item.project.id}
+                  item={item.project}
+                  locale={locale}
+                  menuPosition={
+                    openProjectMenu?.projectId === item.project.id
+                      ? openProjectMenu
+                      : undefined
+                  }
+                  onOpenChange={(menuPosition) =>
+                    setOpenProjectMenu(
+                      menuPosition
+                        ? { projectId: item.project.id, ...menuPosition }
+                        : undefined,
+                    )
+                  }
+                  onNewConversation={() => {
+                    startNewConversation(item.project.id);
+                    setOpenProjectMenu(undefined);
+                  }}
+                  onOpenFolder={() => {
+                    handleOpenProjectFolder(item.project);
+                    setOpenProjectMenu(undefined);
+                  }}
+                  onRename={() => {
+                    setRenamingProject(item.project);
+                    setOpenProjectMenu(undefined);
+                  }}
+                  onRemove={() => {
+                    removeProject(item.project.id);
+                    setOpenProjectMenu(undefined);
+                  }}
+                />
               </div>
-              <div className="conversation-branch">
-                {!isConversationSaved && item.project.id === project.id ? (
-                  <PendingConversationButton
-                    conversation={conversation}
-                    locale={locale}
-                  />
-                ) : null}
-                {item.conversations.map((child) => (
-                  <ConversationButton
-                    isActive={
-                      isConversationSaved && child.id === conversation.id
-                    }
-                    item={child}
-                    key={child.id}
-                    locale={locale}
-                    onOpen={() => openConversation(child.id)}
-                  />
-                ))}
-              </div>
+              {!collapsedProjectIds.has(item.project.id) ? (
+                <div className="conversation-branch">
+                  {!isConversationSaved && item.project.id === project.id ? (
+                    <PendingConversationButton
+                      conversation={conversation}
+                      locale={locale}
+                    />
+                  ) : null}
+                  {item.conversations.map((child) => (
+                    <ConversationButton
+                      isActive={
+                        isConversationSaved && child.id === conversation.id
+                      }
+                      item={child}
+                      key={child.id}
+                      locale={locale}
+                      onOpen={() => openConversation(child.id)}
+                    />
+                  ))}
+                </div>
+              ) : null}
             </div>
           ))}
         </div>
@@ -173,6 +312,11 @@ export function ProjectSidebar() {
         className="sidebar-summary"
         aria-label={t(locale, "localProjectSummary")}
       >
+        {projectFolderError ? (
+          <p className="sidebar-error" role="status">
+            {projectFolderError}
+          </p>
+        ) : null}
         <span>
           {t(locale, "round")} {currentRound}
         </span>
@@ -188,6 +332,20 @@ export function ProjectSidebar() {
         onCreate={(input) => {
           createProject(input);
           setIsProjectDialogOpen(false);
+        }}
+      />
+      <RenameProjectDialog
+        locale={locale}
+        project={renamingProject}
+        projects={projects}
+        onOpenChange={(open) => {
+          if (!open) {
+            setRenamingProject(undefined);
+          }
+        }}
+        onRename={(projectId, title) => {
+          renameProject(projectId, title);
+          setRenamingProject(undefined);
         }}
       />
     </aside>
@@ -273,6 +431,74 @@ function NewProjectDialog({
   );
 }
 
+function RenameProjectDialog({
+  locale,
+  project,
+  projects,
+  onOpenChange,
+  onRename,
+}: {
+  locale: Locale;
+  project?: Project;
+  projects: Project[];
+  onOpenChange: (open: boolean) => void;
+  onRename: (projectId: string, title: string) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const trimmedTitle = title.trim();
+  const hasDuplicateTitle =
+    Boolean(project && trimmedTitle) &&
+    projects.some(
+      (candidate) =>
+        candidate.id !== project?.id &&
+        candidate.title.trim().toLocaleLowerCase() ===
+          trimmedTitle.toLocaleLowerCase(),
+    );
+
+  useEffect(() => {
+    setTitle(project?.title ?? "");
+  }, [project]);
+
+  function submitRename() {
+    if (project && trimmedTitle && !hasDuplicateTitle) {
+      onRename(project.id, trimmedTitle);
+    }
+  }
+
+  return (
+    <Dialog.Root open={Boolean(project)} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content className="form-dialog">
+          <DialogHeader locale={locale} title={t(locale, "renameProject")} />
+          <label className="settings-field">
+            <span>{t(locale, "projectName")}</span>
+            <input
+              className="settings-input"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  submitRename();
+                }
+              }}
+            />
+            {hasDuplicateTitle ? (
+              <p className="settings-error">{t(locale, "projectAlreadyExists")}</p>
+            ) : null}
+          </label>
+          <DialogActions
+            actionLabel={t(locale, "rename")}
+            locale={locale}
+            onCancel={() => onOpenChange(false)}
+            onCreate={submitRename}
+          />
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 function DialogHeader({ locale, title }: { locale: Locale; title: string }) {
   return (
     <div className="dialog-topline">
@@ -285,10 +511,12 @@ function DialogHeader({ locale, title }: { locale: Locale; title: string }) {
 }
 
 function DialogActions({
+  actionLabel,
   locale,
   onCancel,
   onCreate,
 }: {
+  actionLabel?: string;
   locale: Locale;
   onCancel: () => void;
   onCreate: () => void;
@@ -299,7 +527,7 @@ function DialogActions({
         {t(locale, "cancel")}
       </button>
       <button className="primary-action compact-action" type="button" onClick={onCreate}>
-        {t(locale, "create")}
+        {actionLabel ?? t(locale, "create")}
       </button>
     </div>
   );
@@ -308,22 +536,113 @@ function DialogActions({
 function ProjectButton({
   item,
   isActive,
-  onOpen,
+  isCollapsed,
+  onToggle,
 }: {
   item: Project;
   isActive: boolean;
-  onOpen: () => void;
+  isCollapsed: boolean;
+  onToggle: () => void;
 }) {
   return (
     <button
       className={isActive ? "project-chip active" : "project-chip"}
       type="button"
-      onClick={onOpen}
+      aria-expanded={!isCollapsed}
+      onClick={onToggle}
       title={item.projectDirectory || item.title}
     >
       <FolderOpen size={15} aria-hidden="true" />
       <span>{item.title}</span>
     </button>
+  );
+}
+
+function ProjectMenu({
+  item,
+  isOpen,
+  locale,
+  menuPosition,
+  onOpenChange,
+  onNewConversation,
+  onOpenFolder,
+  onRename,
+  onRemove,
+}: {
+  item: Project;
+  isOpen: boolean;
+  locale: Locale;
+  menuPosition?: { x?: number; y?: number };
+  onOpenChange: (menuPosition?: { x: number; y: number }) => void;
+  onNewConversation: () => void;
+  onOpenFolder: () => void;
+  onRename: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div className="project-tree-menu-shell">
+      <button
+        className="project-inline-action"
+        type="button"
+        title={t(locale, "projectActions")}
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (isOpen) {
+            onOpenChange(undefined);
+            return;
+          }
+
+          const buttonRect = event.currentTarget.getBoundingClientRect();
+          const sidebarRight =
+            event.currentTarget.closest(".sidebar")?.getBoundingClientRect()
+              .right ?? window.innerWidth;
+          onOpenChange(
+            getProjectMenuPosition({
+              preferredX: buttonRect.left,
+              preferredY: buttonRect.bottom + projectContextMenuGap,
+              boundaryRight: sidebarRight,
+              fallbackRight: buttonRect.right,
+            }),
+          );
+        }}
+      >
+        <MoreHorizontal size={16} aria-hidden="true" />
+      </button>
+      {isOpen ? (
+        <div
+          className={
+            menuPosition?.x !== undefined && menuPosition.y !== undefined
+              ? "project-actions-menu context"
+              : "project-actions-menu"
+          }
+          role="menu"
+          aria-label={item.title}
+          style={
+            menuPosition?.x !== undefined && menuPosition.y !== undefined
+              ? {
+                  left: menuPosition.x,
+                  top: menuPosition.y,
+                }
+              : undefined
+          }
+        >
+          <button type="button" role="menuitem" onClick={onNewConversation}>
+            {t(locale, "newConversation")}
+          </button>
+          <button type="button" role="menuitem" onClick={onOpenFolder}>
+            {t(locale, "openInExplorer")}
+          </button>
+          <button type="button" role="menuitem" onClick={onRename}>
+            {t(locale, "renameProject")}
+          </button>
+          <button className="danger" type="button" role="menuitem" onClick={onRemove}>
+            {t(locale, "remove")}
+          </button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -379,9 +698,9 @@ function PendingConversationButton({
   );
 }
 
-function sortByUpdatedAt<T extends { updatedAt: string }>(items: T[]) {
+function sortByCreatedAt<T extends { createdAt: string }>(items: T[]) {
   return [...items].sort((left, right) =>
-    right.updatedAt.localeCompare(left.updatedAt),
+    left.createdAt.localeCompare(right.createdAt),
   );
 }
 

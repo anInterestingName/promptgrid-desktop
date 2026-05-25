@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.promptgrid.desktop",
   "build": {
-    "beforeDevCommand": "npm run dev",
-    "devUrl": "http://127.0.0.1:1420",
+    "beforeDevCommand": "npm run dev:tauri-ui",
+    "devUrl": "http://127.0.0.1:1421",
     "beforeBuildCommand": "npm run build",
     "frontendDist": "../dist"
   },

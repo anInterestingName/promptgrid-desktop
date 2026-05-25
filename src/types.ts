@@ -19,6 +19,25 @@ export type TaskStatus =
   | "failed"
   | "cancelled";
 
+export type WorkflowMode = "text-grid" | "main-detail";
+
+export type ImageAsset = {
+  id: string;
+  kind: "source" | "main";
+  imagePath: string;
+  name?: string;
+  createdAt: string;
+};
+
+export type MainDetailState = {
+  sourceImage?: ImageAsset;
+  mainTaskId?: string;
+  detailTaskIds: string[];
+  promptAnalyzedAt?: string;
+};
+
+export type GridCellRole = "grid" | "main" | "detail";
+
 export type Project = {
   id: string;
   title: string;
@@ -47,6 +66,8 @@ export type Conversation = {
   schemaVersion: number;
   createdAt: string;
   updatedAt: string;
+  workflowMode?: WorkflowMode;
+  mainDetail?: MainDetailState;
 };
 
 export type ImageTask = {
@@ -65,6 +86,9 @@ export type ImageTask = {
   model: string;
   createdAt: string;
   updatedAt: string;
+  role?: GridCellRole;
+  referenceImagePath?: string;
+  dependsOnTaskId?: string;
 };
 
 export type AppSettings = {
@@ -113,6 +137,7 @@ export type AppSnapshot = {
   settings: AppSettings;
   selectedTaskId?: string;
   currentRound: number;
+  workflowMode?: WorkflowMode;
 };
 
 export type ModelOption = {

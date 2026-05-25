@@ -45,6 +45,8 @@ pub struct Conversation {
     schema_version: i64,
     created_at: String,
     updated_at: String,
+    workflow_mode: Option<String>,
+    main_detail: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -115,6 +117,9 @@ pub struct GridCell {
     updated_at: String,
     attempt: i64,
     visual: MockVisual,
+    role: Option<String>,
+    reference_image_path: Option<String>,
+    depends_on_task_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -135,6 +140,8 @@ pub struct AppSnapshot {
     settings: AppSettings,
     selected_task_id: Option<String>,
     current_round: i64,
+    #[serde(default)]
+    workflow_mode: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -360,26 +367,13 @@ pub fn pick_data_directory() -> Result<Option<String>, String> {
 }
 
 pub fn load_workspace(store: &LocalStore) -> Result<Option<AppSnapshot>, String> {
-    let connection = store
+    let mut connection = store
         .connection
         .lock()
         .map_err(|_| "Database lock is poisoned".to_string())?;
 
-    let mut project_statement = connection
-        .prepare(
-            "
-            SELECT id, title, project_directory, original_prompt, style, grid_size, aspect_ratio,
-                   quality, output_size, schema_version, created_at, updated_at
-            FROM projects
-            ORDER BY updated_at DESC
-            ",
-        )
-        .map_err(|error| error.to_string())?;
-    let projects = project_statement
-        .query_map([], read_project)
-        .map_err(|error| error.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
+    let projects = read_projects(&connection)?;
+    let projects = prune_missing_project_folders(store, &mut connection, projects)?;
 
     if projects.is_empty() {
         return Ok(None);
@@ -413,7 +407,7 @@ pub fn load_workspace(store: &LocalStore) -> Result<Option<AppSnapshot>, String>
             "
             SELECT id, project_id, title, original_prompt, style, grid_size,
                    aspect_ratio, quality, output_size, schema_version,
-                   created_at, updated_at
+                   created_at, updated_at, workflow_mode, main_detail
             FROM conversations
             ORDER BY updated_at DESC
             ",
@@ -456,7 +450,7 @@ pub fn load_workspace(store: &LocalStore) -> Result<Option<AppSnapshot>, String>
             SELECT id, project_id, conversation_id, parent_task_id, exploration_round, cell_index,
                    prompt, direction_title, status, image_path, error_message, provider, model,
                    created_at, updated_at, attempt, visual_title, visual_palette,
-                   visual_texture
+                   visual_texture, role, reference_image_path, depends_on_task_id
             FROM image_tasks
             ORDER BY conversation_id, exploration_round, cell_index
             ",
@@ -535,6 +529,9 @@ pub fn load_workspace(store: &LocalStore) -> Result<Option<AppSnapshot>, String>
         settings,
         selected_task_id,
         current_round,
+        workflow_mode: conversation
+            .as_ref()
+            .and_then(|conversation| conversation.workflow_mode.clone()),
     }))
 }
 
@@ -550,6 +547,7 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
         mut settings,
         selected_task_id,
         current_round,
+        workflow_mode: _workflow_mode,
     } = snapshot;
     migrate_legacy_api_keys(&mut settings)?;
     refresh_api_key_status(&mut settings);
@@ -573,6 +571,7 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
         .connection
         .lock()
         .map_err(|_| "Database lock is poisoned".to_string())?;
+    let previous_projects = read_projects(&connection)?;
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
@@ -624,9 +623,9 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
                 INSERT INTO conversations (
                     id, project_id, title, original_prompt, style, grid_size,
                     aspect_ratio, quality, output_size, schema_version,
-                    created_at, updated_at
+                    created_at, updated_at, workflow_mode, main_detail
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
                 ON CONFLICT(id) DO UPDATE SET
                     project_id = excluded.project_id,
                     title = excluded.title,
@@ -637,6 +636,8 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
                     quality = excluded.quality,
                     output_size = excluded.output_size,
                     schema_version = excluded.schema_version,
+                    workflow_mode = excluded.workflow_mode,
+                    main_detail = excluded.main_detail,
                     updated_at = excluded.updated_at
                 ",
                 params![
@@ -652,6 +653,11 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
                     conversation.schema_version,
                     &conversation.created_at,
                     &conversation.updated_at,
+                    &conversation.workflow_mode,
+                    conversation
+                        .main_detail
+                        .as_ref()
+                        .map(|value| value.to_string()),
                 ],
             )
             .map_err(|error| error.to_string())?;
@@ -674,9 +680,9 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
                     id, project_id, conversation_id, parent_task_id, exploration_round, cell_index,
                     prompt, direction_title, status, image_path, error_message, provider, model,
                     created_at, updated_at, attempt, visual_title, visual_palette,
-                    visual_texture
+                    visual_texture, role, reference_image_path, depends_on_task_id
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
                 ",
             )
             .map_err(|error| error.to_string())?;
@@ -721,6 +727,9 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
                         task.visual.title,
                         palette,
                         task.visual.texture,
+                        task.role,
+                        task.reference_image_path,
+                        task.depends_on_task_id,
                     ])
                     .map_err(|error| error.to_string())?;
             }
@@ -767,6 +776,7 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
         .map_err(|error| error.to_string())?;
 
     transaction.commit().map_err(|error| error.to_string())?;
+    rename_default_project_folders(store, &previous_projects, &project_files_projects)?;
     sync_project_files(
         store,
         &project_files_projects,
@@ -810,6 +820,82 @@ pub fn save_generated_image(
     Ok(SavedImage {
         image_path: path_to_display_string(&image_path),
     })
+}
+
+pub fn project_directory(
+    store: &LocalStore,
+    project_id: &str,
+    project_title: &str,
+    project_directory: Option<&str>,
+) -> Result<PathBuf, String> {
+    let data_dir = store
+        .data_dir
+        .lock()
+        .map_err(|_| "Storage path lock is poisoned".to_string())?
+        .clone();
+    let project_directory =
+        resolve_project_directory(&data_dir, project_id, project_title, project_directory)?;
+    fs::create_dir_all(&project_directory)
+        .map_err(|error| format!("Could not create project folder: {error}"))?;
+
+    Ok(project_directory)
+}
+
+fn rename_default_project_folders(
+    store: &LocalStore,
+    previous_projects: &[Project],
+    projects: &[Project],
+) -> Result<(), String> {
+    let data_dir = store
+        .data_dir
+        .lock()
+        .map_err(|_| "Storage path lock is poisoned".to_string())?
+        .clone();
+
+    for project in projects {
+        if project.project_directory.is_some() {
+            continue;
+        }
+
+        let Some(previous_project) = previous_projects
+            .iter()
+            .find(|candidate| candidate.id == project.id)
+        else {
+            continue;
+        };
+
+        if previous_project.project_directory.is_some()
+            || previous_project.title == project.title
+        {
+            continue;
+        }
+
+        let old_directory =
+            resolve_project_directory(&data_dir, &project.id, &previous_project.title, None)?;
+        let new_directory =
+            resolve_project_directory(&data_dir, &project.id, &project.title, None)?;
+
+        if old_directory == new_directory || !old_directory.exists() {
+            continue;
+        }
+
+        if new_directory.exists() {
+            return Err(format!(
+                "Project folder already exists: {}",
+                path_to_display_string(&new_directory)
+            ));
+        }
+
+        fs::rename(&old_directory, &new_directory).map_err(|error| {
+            format!(
+                "Could not rename project folder from {} to {}: {error}",
+                path_to_display_string(&old_directory),
+                path_to_display_string(&new_directory)
+            )
+        })?;
+    }
+
+    Ok(())
 }
 
 fn sync_project_files(
@@ -974,6 +1060,8 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             schema_version INTEGER NOT NULL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            workflow_mode TEXT,
+            main_detail TEXT,
             FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
 
@@ -997,6 +1085,9 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             visual_title TEXT NOT NULL,
             visual_palette TEXT NOT NULL,
             visual_texture TEXT NOT NULL,
+            role TEXT,
+            reference_image_path TEXT,
+            depends_on_task_id TEXT,
             FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
 
@@ -1032,8 +1123,13 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
         "TEXT NOT NULL DEFAULT 'standard'",
     )?;
     ensure_column(connection, "projects", "project_directory", "TEXT")?;
+    ensure_column(connection, "conversations", "workflow_mode", "TEXT")?;
+    ensure_column(connection, "conversations", "main_detail", "TEXT")?;
     ensure_column(connection, "image_tasks", "direction_title", "TEXT")?;
     ensure_column(connection, "image_tasks", "conversation_id", "TEXT")?;
+    ensure_column(connection, "image_tasks", "role", "TEXT")?;
+    ensure_column(connection, "image_tasks", "reference_image_path", "TEXT")?;
+    ensure_column(connection, "image_tasks", "depends_on_task_id", "TEXT")?;
     ensure_column(connection, "app_state", "selected_conversation_id", "TEXT")?;
     connection.execute(
         "
@@ -1063,6 +1159,91 @@ fn read_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     })
 }
 
+fn read_projects(connection: &Connection) -> Result<Vec<Project>, String> {
+    let mut project_statement = connection
+        .prepare(
+            "
+            SELECT id, title, project_directory, original_prompt, style, grid_size, aspect_ratio,
+                   quality, output_size, schema_version, created_at, updated_at
+            FROM projects
+            ORDER BY updated_at DESC
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+
+    let projects = project_statement
+        .query_map([], read_project)
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    Ok(projects)
+}
+
+fn prune_missing_project_folders(
+    store: &LocalStore,
+    connection: &mut Connection,
+    projects: Vec<Project>,
+) -> Result<Vec<Project>, String> {
+    let data_dir = store
+        .data_dir
+        .lock()
+        .map_err(|_| "Storage path lock is poisoned".to_string())?
+        .clone();
+    let default_projects_dir = data_dir.join("projects");
+    let mut existing_projects = Vec::new();
+    let mut missing_project_ids = Vec::new();
+
+    for project in projects {
+        if project.project_directory.is_none() && !default_projects_dir.exists() {
+            existing_projects.push(project);
+            continue;
+        }
+
+        let project_directory = resolve_project_directory(
+            &data_dir,
+            &project.id,
+            &project.title,
+            project.project_directory.as_deref(),
+        )?;
+
+        if project_directory.is_dir() {
+            existing_projects.push(project);
+        } else {
+            missing_project_ids.push(project.id);
+        }
+    }
+
+    if missing_project_ids.is_empty() {
+        return Ok(existing_projects);
+    }
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+
+    for project_id in &missing_project_ids {
+        transaction
+            .execute(
+                "DELETE FROM image_tasks WHERE project_id = ?1",
+                params![project_id],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                "DELETE FROM conversations WHERE project_id = ?1",
+                params![project_id],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute("DELETE FROM projects WHERE id = ?1", params![project_id])
+            .map_err(|error| error.to_string())?;
+    }
+
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(existing_projects)
+}
+
 fn read_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> {
     Ok(Conversation {
         id: row.get(0)?,
@@ -1077,6 +1258,14 @@ fn read_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> 
         schema_version: row.get(9)?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
+        workflow_mode: row.get(12)?,
+        main_detail: row
+            .get::<_, Option<String>>(13)?
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(13, Type::Text, Box::new(error))
+            })?,
     })
 }
 
@@ -1108,6 +1297,9 @@ fn read_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<GridCell> {
             palette,
             texture: row.get(18)?,
         },
+        role: row.get(19)?,
+        reference_image_path: row.get(20)?,
+        depends_on_task_id: row.get(21)?,
     })
 }
 
@@ -1138,7 +1330,7 @@ fn migrate_legacy_conversations(connection: &Connection) -> rusqlite::Result<()>
         INSERT INTO conversations (
             id, project_id, title, original_prompt, style, grid_size,
             aspect_ratio, quality, output_size, schema_version,
-            created_at, updated_at
+            created_at, updated_at, workflow_mode, main_detail
         )
         SELECT
             'conversation-' || projects.id,
@@ -1152,7 +1344,9 @@ fn migrate_legacy_conversations(connection: &Connection) -> rusqlite::Result<()>
             projects.output_size,
             projects.schema_version,
             projects.created_at,
-            projects.updated_at
+            projects.updated_at,
+            'text-grid',
+            NULL
         FROM projects
         WHERE EXISTS (
             SELECT 1 FROM image_tasks

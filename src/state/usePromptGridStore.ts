@@ -37,10 +37,13 @@ import type {
   AspectRatio,
   Conversation,
   GridCell,
+  ImageAsset,
+  MainDetailState,
   GridSize,
   OutputSize,
   Project,
   Quality,
+  WorkflowMode,
 } from "../types";
 
 type ActiveSection = "projects" | "settings";
@@ -66,16 +69,22 @@ type PromptGridState = {
   isHydrating: boolean;
   storageStatus: StorageStatus;
   currentRound: number;
+  workflowMode: WorkflowMode;
+  mainDetail: MainDetailState;
   hydrate: () => Promise<void>;
   setActiveSection: (section: ActiveSection) => void;
+  setWorkflowMode: (mode: WorkflowMode) => void;
   setLocale: (locale: Locale) => void;
   setColorTheme: (colorTheme: ColorTheme) => void;
   updateSettings: (settings: Partial<AppSettings>) => void;
+  setSourceImage: (asset?: ImageAsset) => void;
   createProject: (input?: { title?: string; projectDirectory?: string }) => void;
   startNewConversation: (projectId?: string) => void;
   openProject: (projectId: string) => void;
   openConversation: (conversationId: string) => void;
   setProjectTitle: (title: string) => void;
+  renameProject: (projectId: string, title: string) => void;
+  removeProject: (projectId: string) => void;
   setConversationTitle: (title: string) => void;
   setOriginalPrompt: (prompt: string) => void;
   setStyle: (style: string) => void;
@@ -90,6 +99,9 @@ type PromptGridState = {
   regenerateTask: (taskId: string) => void;
   retryTask: (taskId: string) => void;
   expandFromTask: (taskId: string) => void;
+  analyzeMainDetailPrompt: () => void;
+  generateMainImage: () => void;
+  generateDetailImages: () => void;
 };
 
 const firstTasks = createMockTasks(
@@ -100,6 +112,10 @@ const firstTasks = createMockTasks(
   mockConversation.id,
 );
 const firstSelectedTaskId = firstTasks[0]?.id;
+
+const emptyMainDetailState: MainDetailState = {
+  detailTaskIds: [],
+};
 
 function createSnapshot(state: PromptGridState): AppSnapshot {
   const projects = upsertById(state.projects, state.project);
@@ -130,6 +146,7 @@ function createSnapshot(state: PromptGridState): AppSnapshot {
     settings: state.settings,
     selectedTaskId: state.isConversationSaved ? state.selectedTaskId : undefined,
     currentRound: state.isConversationSaved ? state.currentRound : 1,
+    workflowMode: state.workflowMode,
   };
 }
 
@@ -158,6 +175,8 @@ function createSnapshotSignature(state: PromptGridState) {
     settings: state.settings,
     selectedTaskId: state.isConversationSaved ? state.selectedTaskId ?? "" : "",
     currentRound: state.isConversationSaved ? state.currentRound : 1,
+    workflowMode: state.workflowMode,
+    mainDetail: state.mainDetail,
     conversationTasks: conversationTaskSignature,
   });
 }
@@ -181,6 +200,9 @@ function createTasksSignature(tasks: GridCell[]) {
         task.attempt,
         task.updatedAt,
         getImagePathSignature(task.imagePath),
+        task.role ?? "",
+        getImagePathSignature(task.referenceImagePath),
+        task.dependsOnTaskId ?? "",
         task.visual.title,
         task.visual.texture,
         ...task.visual.palette,
@@ -267,6 +289,9 @@ function normalizeSnapshot(snapshot: AppSnapshot, locale: Locale) {
       ? snapshot.selectedTaskId
       : tasks[0]?.id;
   const highestRound = getHighestRound(tasks);
+  const workflowMode =
+    snapshot.workflowMode ?? conversation.workflowMode ?? "text-grid";
+  const mainDetail = normalizeMainDetailState(conversation.mainDetail);
 
   return {
     project,
@@ -287,6 +312,8 @@ function normalizeSnapshot(snapshot: AppSnapshot, locale: Locale) {
     selectedTaskId,
     previewTaskId: undefined,
     currentRound: savedConversation ? Math.max(snapshot.currentRound, highestRound) : 1,
+    workflowMode,
+    mainDetail,
   };
 }
 
@@ -349,6 +376,19 @@ function normalizeConversation(
     schemaVersion: conversation.schemaVersion ?? project.schemaVersion,
     createdAt: conversation.createdAt ?? project.createdAt,
     updatedAt: conversation.updatedAt ?? project.updatedAt,
+    workflowMode: conversation.workflowMode ?? "text-grid",
+    mainDetail: normalizeMainDetailState(conversation.mainDetail),
+  };
+}
+
+function normalizeMainDetailState(
+  mainDetail: Partial<MainDetailState> | undefined,
+): MainDetailState {
+  return {
+    sourceImage: mainDetail?.sourceImage,
+    mainTaskId: mainDetail?.mainTaskId,
+    detailTaskIds: mainDetail?.detailTaskIds ?? [],
+    promptAnalyzedAt: mainDetail?.promptAnalyzedAt,
   };
 }
 
@@ -470,6 +510,12 @@ function getLatestConversationForProject(
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
 }
 
+function sortByUpdatedAt<T extends { updatedAt: string }>(items: T[]) {
+  return [...items].sort((left, right) =>
+    right.updatedAt.localeCompare(left.updatedAt),
+  );
+}
+
 function createWorkspacePatch(
   state: PromptGridState,
   project: Project,
@@ -518,6 +564,8 @@ function createPendingWorkspacePatch(
     currentRound: 1,
     activeSection: "projects" as const,
     isConversationSaved: false,
+    workflowMode: conversation.workflowMode ?? "text-grid",
+    mainDetail: normalizeMainDetailState(conversation.mainDetail),
   };
 }
 
@@ -575,6 +623,163 @@ function createActiveTaskPatch(
       [conversation.id]: tasks,
     },
   };
+}
+
+function createMainDetailTasks(state: PromptGridState) {
+  const createdAt = new Date().toISOString();
+  const sourceImage = state.mainDetail.sourceImage;
+  const mainTaskId =
+    state.mainDetail.mainTaskId ?? `main-detail-main-${Date.now()}`;
+  const detailPrompts = createDetailPrompts(state.project.originalPrompt);
+  const provider = getConfiguredProviderLabel(state.settings);
+  const model = getConfiguredImageModel(state.settings);
+  const mainTask: GridCell = {
+    id: mainTaskId,
+    projectId: state.project.id,
+    conversationId: state.conversation.id,
+    explorationRound: state.currentRound,
+    index: 0,
+    prompt: createMainImagePrompt(state.project.originalPrompt, state.project.style),
+    directionTitle: "Main Image",
+    status: "pending",
+    provider,
+    model,
+    createdAt,
+    updatedAt: createdAt,
+    attempt: 1,
+    visual: mockVisuals[0],
+    role: "main",
+    referenceImagePath: sourceImage?.imagePath,
+  };
+  const detailTasks = detailPrompts.map((prompt, index) => ({
+    id: `main-detail-detail-${index + 1}-${Date.now()}`,
+    projectId: state.project.id,
+    conversationId: state.conversation.id,
+    explorationRound: state.currentRound,
+    index: index + 1,
+    prompt,
+    directionTitle: getDetailDirectionTitle(index),
+    status: "pending" as const,
+    provider,
+    model,
+    createdAt,
+    updatedAt: createdAt,
+    attempt: 1,
+    visual: mockVisuals[(index + 1) % mockVisuals.length],
+    role: "detail" as const,
+    referenceImagePath: sourceImage?.imagePath,
+    dependsOnTaskId: mainTask.id,
+  }));
+  const tasks = [mainTask, ...detailTasks];
+  const mainDetail = {
+    ...state.mainDetail,
+    mainTaskId: mainTask.id,
+    detailTaskIds: detailTasks.map((task) => task.id),
+  };
+
+  return { tasks, mainDetail };
+}
+
+function createAnalyzedMainDetailTasks(
+  state: PromptGridState,
+  analysis?: { conversationTitle?: string; directions?: Array<{ prompt: string; title: string }> },
+) {
+  const { tasks, mainDetail } = createMainDetailTasks(state);
+  const mainDirection = analysis?.directions?.[0];
+  const detailDirections = analysis?.directions?.slice(1) ?? [];
+  const analyzedTasks = tasks.map((task) => {
+    if (task.role === "main") {
+      return {
+        ...task,
+        prompt: mainDirection?.prompt || task.prompt,
+        directionTitle: mainDirection?.title || task.directionTitle,
+        status: "pending" as const,
+        imagePath: undefined,
+        errorMessage: undefined,
+      };
+    }
+
+    const detailDirection = detailDirections[task.index - 1];
+    return {
+      ...task,
+      prompt: detailDirection?.prompt || task.prompt,
+      directionTitle: detailDirection?.title || task.directionTitle,
+      status: "pending" as const,
+      imagePath: undefined,
+      errorMessage: undefined,
+    };
+  });
+
+  return {
+    tasks: analyzedTasks,
+    mainDetail: {
+      ...mainDetail,
+      promptAnalyzedAt: new Date().toISOString(),
+    },
+  };
+}
+
+function createMainDetailAnalysisProject(state: PromptGridState): Project {
+  return {
+    ...state.project,
+    gridSize: 9,
+    originalPrompt: [
+      state.project.originalPrompt.trim(),
+      "Analyze this as an ecommerce main image plus detail image set.",
+      "Create one prompt for the main image first, then eight related detail-image prompts.",
+      "Every detail-image prompt must clearly connect to the main image concept and preserve the same product identity.",
+      state.mainDetail.sourceImage
+        ? "A source/reference image is attached by the user and should be treated as the visual product reference."
+        : "No source image is attached yet, so make the prompts work from the written product idea.",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  };
+}
+
+function createMainImagePrompt(originalPrompt: string, style: string) {
+  const subject = originalPrompt.trim() || "the uploaded product";
+  return [
+    subject,
+    "Create one polished ecommerce hero main image based on the uploaded source image.",
+    `Visual style: ${style}.`,
+    "Keep the product identity, shape, material, and key visual traits consistent.",
+    "Use a clean commercial composition with clear focal hierarchy and premium lighting.",
+  ].join(" ");
+}
+
+function createDetailPrompts(originalPrompt: string) {
+  const subject = originalPrompt.trim() || "the product from the source image";
+  const directions = [
+    "material close-up detail image with texture and finish clearly visible",
+    "functional feature detail image that explains the strongest selling point",
+    "in-use lifestyle detail scene with the product naturally placed",
+    "packaging and accessory detail image arranged cleanly for ecommerce",
+    "scale and structure detail image showing proportions and key parts",
+    "comparison or before-after detail image that clarifies product value",
+    "premium atmosphere detail image for a product detail page banner",
+    "minimal isolated detail image with crisp shadows and high readability",
+  ];
+
+  return directions.map(
+    (direction) =>
+      `${subject}. Generate a ${direction}. Maintain product consistency with the uploaded source image and main image.`,
+  );
+}
+
+function getDetailDirectionTitle(index: number) {
+  const titles = [
+    "Material Detail",
+    "Feature Detail",
+    "Lifestyle Detail",
+    "Packaging Detail",
+    "Scale Detail",
+    "Value Detail",
+    "Atmosphere Detail",
+    "Isolated Detail",
+  ];
+
+  return titles[index] ?? `Detail ${index + 1}`;
 }
 
 async function runImageGeneration(
@@ -741,6 +946,8 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
   isHydrating: false,
   storageStatus: "idle",
   currentRound: 1,
+  workflowMode: "text-grid",
+  mainDetail: emptyMainDetailState,
   hydrate: async () => {
     const state = get();
     if (state.isHydrated || state.isHydrating) {
@@ -775,6 +982,25 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
     }
   },
   setActiveSection: (activeSection) => set({ activeSection }),
+  setWorkflowMode: (workflowMode) =>
+    set((state) => {
+      const updatedAt = new Date().toISOString();
+      const conversation = {
+        ...state.conversation,
+        workflowMode,
+        mainDetail: state.mainDetail,
+        updatedAt,
+      };
+      const project = {
+        ...state.project,
+        updatedAt,
+      };
+
+      return {
+        ...createActiveMetadataPatch(state, project, conversation),
+        workflowMode,
+      };
+    }),
   setLocale: (locale) => {
     saveLocale(locale);
     set({ locale });
@@ -790,6 +1016,31 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
         ...settings,
       },
     })),
+  setSourceImage: (asset) =>
+    set((state) => {
+      const updatedAt = new Date().toISOString();
+      const mainDetail = {
+        ...state.mainDetail,
+        sourceImage: asset,
+        promptAnalyzedAt: undefined,
+      };
+      const conversation = {
+        ...state.conversation,
+        mainDetail,
+        workflowMode: "main-detail" as const,
+        updatedAt,
+      };
+      const project = {
+        ...state.project,
+        updatedAt,
+      };
+
+      return {
+        ...createActiveMetadataPatch(state, project, conversation),
+        workflowMode: "main-detail" as const,
+        mainDetail,
+      };
+    }),
   createProject: (input) =>
     set((state) => {
       const project = createTimestampedProject(
@@ -830,26 +1081,18 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
         return createPendingWorkspacePatch(state, projectRecord);
       }
 
-      const openedAt = new Date().toISOString();
-      const touchedConversation = {
-        ...conversation,
-        updatedAt: openedAt,
-      };
-      const project = {
-        ...mergeProjectWithConversation(projectRecord, touchedConversation),
-        updatedAt: openedAt,
-      };
+      const project = mergeProjectWithConversation(projectRecord, conversation);
       const tasks =
-        state.conversationTasks[touchedConversation.id] ??
+        state.conversationTasks[conversation.id] ??
         createMockTasks(
           project,
-          touchedConversation.originalPrompt,
+          conversation.originalPrompt,
           1,
           undefined,
-          touchedConversation.id,
+          conversation.id,
         );
 
-      return createWorkspacePatch(state, project, touchedConversation, tasks);
+      return createWorkspacePatch(state, project, conversation, tasks);
     }),
   openConversation: (conversationId) =>
     set((state) => {
@@ -867,26 +1110,18 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
         return {};
       }
 
-      const openedAt = new Date().toISOString();
-      const touchedConversation = {
-        ...conversation,
-        updatedAt: openedAt,
-      };
-      const project = {
-        ...mergeProjectWithConversation(projectRecord, touchedConversation),
-        updatedAt: openedAt,
-      };
+      const project = mergeProjectWithConversation(projectRecord, conversation);
       const tasks =
-        state.conversationTasks[touchedConversation.id] ??
+        state.conversationTasks[conversation.id] ??
         createMockTasks(
           project,
-          touchedConversation.originalPrompt,
+          conversation.originalPrompt,
           1,
           undefined,
-          touchedConversation.id,
+          conversation.id,
         );
 
-      return createWorkspacePatch(state, project, touchedConversation, tasks);
+      return createWorkspacePatch(state, project, conversation, tasks);
     }),
   setProjectTitle: (title) =>
     set((state) => {
@@ -900,6 +1135,135 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
       return {
         project,
         projects: upsertById(state.projects, project),
+      };
+    }),
+  renameProject: (projectId, title) =>
+    set((state) => {
+      const projectRecord = state.projects.find(
+        (candidate) => candidate.id === projectId,
+      );
+      const trimmedTitle = title.trim();
+      if (
+        !projectRecord ||
+        !trimmedTitle ||
+        state.projects.some(
+          (candidate) =>
+            candidate.id !== projectId &&
+            candidate.title.trim().toLocaleLowerCase() ===
+              trimmedTitle.toLocaleLowerCase(),
+        )
+      ) {
+        return {};
+      }
+
+      const updatedAt = new Date().toISOString();
+      const renamedProject = {
+        ...projectRecord,
+        title: trimmedTitle,
+        updatedAt,
+      };
+
+      return {
+        project:
+          state.project.id === projectId
+            ? {
+                ...state.project,
+                title: trimmedTitle,
+                updatedAt,
+              }
+            : state.project,
+        projects: upsertById(state.projects, renamedProject),
+      };
+    }),
+  removeProject: (projectId) =>
+    set((state) => {
+      const remainingProjects = state.projects.filter(
+        (candidate) => candidate.id !== projectId,
+      );
+      const remainingConversations = state.conversations.filter(
+        (candidate) => candidate.projectId !== projectId,
+      );
+      const conversationTasks = Object.fromEntries(
+        Object.entries(state.conversationTasks).filter(([conversationId]) =>
+          remainingConversations.some(
+            (conversation) => conversation.id === conversationId,
+          ),
+        ),
+      );
+
+      if (state.project.id !== projectId) {
+        return {
+          projects: remainingProjects,
+          conversations: remainingConversations,
+          conversationTasks,
+        };
+      }
+
+      const nextProject =
+        sortByUpdatedAt(remainingProjects)[0] ??
+        createTimestampedProject(
+          {
+            ...state,
+            projects: remainingProjects,
+          },
+          getUntitledProjectName(state.locale, 1),
+        );
+      const nextConversation = getLatestConversationForProject(
+        remainingConversations,
+        nextProject.id,
+      );
+
+      if (!nextConversation) {
+        const pendingPatch = createPendingWorkspacePatch(
+          {
+            ...state,
+            projects: remainingProjects,
+            conversations: remainingConversations,
+            conversationTasks,
+          },
+          nextProject,
+        );
+
+        return {
+          ...pendingPatch,
+          projects: upsertById(remainingProjects, pendingPatch.project),
+          conversations: remainingConversations,
+          conversationTasks: {
+            ...conversationTasks,
+            [pendingPatch.conversation.id]: pendingPatch.tasks,
+          },
+        };
+      }
+
+      const project = mergeProjectWithConversation(nextProject, nextConversation);
+      const tasks =
+        conversationTasks[nextConversation.id] ??
+        createMockTasks(
+          project,
+          nextConversation.originalPrompt,
+          1,
+          undefined,
+          nextConversation.id,
+        );
+
+      return {
+        ...createWorkspacePatch(
+          {
+            ...state,
+            projects: remainingProjects,
+            conversations: remainingConversations,
+            conversationTasks,
+          },
+          project,
+          nextConversation,
+          tasks,
+        ),
+        projects: remainingProjects,
+        conversations: remainingConversations,
+        conversationTasks: {
+          ...conversationTasks,
+          [nextConversation.id]: tasks,
+        },
       };
     }),
   setConversationTitle: (title) =>
@@ -920,6 +1284,13 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
   setOriginalPrompt: (originalPrompt) =>
     set((state) => {
       const updatedAt = new Date().toISOString();
+      const mainDetail =
+        state.workflowMode === "main-detail"
+          ? {
+              ...state.mainDetail,
+              promptAnalyzedAt: undefined,
+            }
+          : state.mainDetail;
       const project = {
         ...state.project,
         originalPrompt,
@@ -928,10 +1299,14 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
       const conversation = {
         ...state.conversation,
         originalPrompt,
+        mainDetail,
         updatedAt,
       };
 
-      return createActiveMetadataPatch(state, project, conversation);
+      return {
+        ...createActiveMetadataPatch(state, project, conversation),
+        mainDetail,
+      };
     }),
   setStyle: (style) =>
     set((state) => {
@@ -1199,6 +1574,217 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
       selectedTaskId: tasks[0]?.id,
       previewTaskId: undefined,
     }));
+  },
+  analyzeMainDetailPrompt: () => {
+    if (get().isAnalyzing || get().isGenerating) {
+      return;
+    }
+
+    set({ isAnalyzing: true });
+    void (async () => {
+      const state = get();
+
+      try {
+        const analysis = await analyzePromptDirections(
+          createMainDetailAnalysisProject(state),
+          state.settings,
+        );
+        const { tasks, mainDetail } = createAnalyzedMainDetailTasks(
+          state,
+          analysis,
+        );
+        const title = createAnalysisConversationTitle(
+          analysis.conversationTitle,
+          state.project.originalPrompt,
+          state.locale,
+        );
+        const updatedAt = new Date().toISOString();
+        const conversation = state.isConversationSaved
+          ? {
+              ...state.conversation,
+              title,
+              originalPrompt: state.project.originalPrompt,
+              style: state.project.style,
+              gridSize: state.project.gridSize,
+              aspectRatio: state.project.aspectRatio,
+              quality: state.project.quality,
+              outputSize: state.project.outputSize,
+              workflowMode: "main-detail" as const,
+              mainDetail,
+              updatedAt,
+            }
+          : {
+              ...createTimestampedConversation(
+                state.project,
+                title,
+                state.project.originalPrompt,
+              ),
+              workflowMode: "main-detail" as const,
+              mainDetail,
+              updatedAt,
+            };
+        const project = {
+          ...mergeProjectWithConversation(state.project, conversation),
+          updatedAt,
+        };
+
+        set((latestState) => ({
+          ...createActiveTaskPatch(
+            {
+              ...latestState,
+              project,
+              conversation,
+              isConversationSaved: true,
+            },
+            tasks,
+            updatedAt,
+          ),
+          conversations: upsertById(latestState.conversations, conversation),
+          workflowMode: "main-detail" as const,
+          mainDetail,
+          selectedTaskId: tasks[0]?.id,
+          previewTaskId: undefined,
+          isConversationSaved: true,
+          isAnalyzing: false,
+        }));
+      } catch (error) {
+        const { tasks, mainDetail } = createAnalyzedMainDetailTasks(state);
+        const errorMessage = getErrorMessage(error);
+        const failedTasks = tasks.map((task) => ({
+          ...task,
+          status: "failed" as const,
+          errorMessage,
+          updatedAt: new Date().toISOString(),
+        }));
+
+        set((latestState) => ({
+          ...createActiveTaskPatch(latestState, failedTasks),
+          workflowMode: "main-detail" as const,
+          mainDetail,
+          selectedTaskId: failedTasks[0]?.id,
+          previewTaskId: undefined,
+          isAnalyzing: false,
+        }));
+      }
+    })();
+  },
+  generateMainImage: () => {
+    const state = get();
+    if (state.isAnalyzing || state.isGenerating) {
+      return;
+    }
+
+    if (state.workflowMode !== "main-detail" || !state.mainDetail.promptAnalyzedAt) {
+      return;
+    }
+
+    let mainTask = state.tasks.find((task) => task.role === "main");
+    if (!mainTask) {
+      const { tasks, mainDetail } = createMainDetailTasks(state);
+      const updatedAt = new Date().toISOString();
+      const conversation = {
+        ...state.conversation,
+        workflowMode: "main-detail" as const,
+        mainDetail,
+        updatedAt,
+      };
+      const project = {
+        ...state.project,
+        updatedAt,
+      };
+
+      set({
+        ...createActiveTaskPatch(
+          {
+            ...state,
+            project,
+            conversation,
+            tasks,
+            workflowMode: "main-detail",
+            mainDetail,
+            isConversationSaved: true,
+          },
+          tasks,
+          updatedAt,
+        ),
+        conversations: upsertById(state.conversations, conversation),
+        workflowMode: "main-detail",
+        mainDetail,
+        selectedTaskId: tasks[0]?.id,
+        previewTaskId: undefined,
+        isConversationSaved: true,
+      });
+      mainTask = tasks.find((task) => task.role === "main");
+    }
+
+    const latestState = get();
+    const taskId =
+      latestState.tasks.find((task) => task.role === "main")?.id ?? mainTask?.id;
+    if (!taskId) {
+      return;
+    }
+
+    const conversationId = latestState.conversation.id;
+    set((state) => {
+      const tasks = state.tasks.map((task) =>
+        task.id === taskId
+          ? {
+              ...task,
+              status: "pending" as const,
+              errorMessage: undefined,
+              updatedAt: new Date().toISOString(),
+            }
+          : task,
+      );
+
+      return {
+        ...createActiveTaskPatch(state, tasks),
+        isGenerating: true,
+      };
+    });
+
+    void runImageGeneration(get, set, [taskId], conversationId);
+  },
+  generateDetailImages: () => {
+    const state = get();
+    if (state.isAnalyzing || state.isGenerating || state.workflowMode !== "main-detail") {
+      return;
+    }
+
+    const mainTask = state.tasks.find((task) => task.role === "main");
+    if (!mainTask || mainTask.status !== "completed" || !mainTask.imagePath) {
+      return;
+    }
+
+    const taskIds = state.tasks
+      .filter((task) => task.role === "detail")
+      .map((task) => task.id);
+    if (taskIds.length === 0) {
+      return;
+    }
+
+    const conversationId = state.conversation.id;
+    set((state) => {
+      const tasks = state.tasks.map((task) =>
+        taskIds.includes(task.id)
+          ? {
+              ...task,
+              referenceImagePath: mainTask.imagePath,
+              dependsOnTaskId: mainTask.id,
+              status: "pending" as const,
+              errorMessage: undefined,
+              updatedAt: new Date().toISOString(),
+            }
+          : task,
+      );
+
+      return {
+        ...createActiveTaskPatch(state, tasks),
+        isGenerating: true,
+      };
+    });
+
+    void runImageGeneration(get, set, taskIds, conversationId);
   },
 }));
 

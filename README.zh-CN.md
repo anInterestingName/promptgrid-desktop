@@ -98,6 +98,8 @@ npm run dev
 npm run tauri:dev
 ```
 
+桌面端开发服务使用独立端口 `http://127.0.0.1:1421`，可以和浏览器 Web UI 同时运行。
+
 构建前端：
 
 ```bash
@@ -114,6 +116,7 @@ npm run tauri:build
 
 ```text
 npm run dev          在 http://127.0.0.1:1420 启动 Vite Web UI
+npm run dev:tauri-ui 在 http://127.0.0.1:1421 启动 Tauri 使用的 Vite UI
 npm run build        类型检查并构建前端
 npm run preview      预览前端生产构建结果
 npm run tauri        运行 Tauri CLI

@@ -16,6 +16,7 @@ import type { GridCell } from "../types";
 export function GridWorkspace() {
   const locale = usePromptGridStore((state) => state.locale);
   const tasks = usePromptGridStore((state) => state.tasks);
+  const workflowMode = usePromptGridStore((state) => state.workflowMode);
   const selectedTaskId = usePromptGridStore((state) => state.selectedTaskId);
   const previewTaskId = usePromptGridStore((state) => state.previewTaskId);
   const selectTask = usePromptGridStore((state) => state.selectTask);
@@ -36,8 +37,16 @@ export function GridWorkspace() {
     <section className="grid-workspace" aria-label={t(locale, "imageGridAria")}>
       <div className="workspace-header">
         <div>
-          <p className="eyebrow">{t(locale, "gridEyebrow")}</p>
-          <h2>{t(locale, "promptDirections")}</h2>
+          <p className="eyebrow">
+            {workflowMode === "main-detail"
+              ? t(locale, "mainDetailEyebrow")
+              : t(locale, "gridEyebrow")}
+          </p>
+          <h2>
+            {workflowMode === "main-detail"
+              ? t(locale, "mainDetailDirections")
+              : t(locale, "promptDirections")}
+          </h2>
         </div>
         <div className="export-actions">
           <button type="button" title={t(locale, "exportSelectedImage")}>
@@ -148,7 +157,11 @@ function GridCellCard({
       <div className="cell-body">
         <div className="cell-meta">
           <span>
-            {t(locale, "cell")} {task.index + 1}
+            {task.role === "main"
+              ? t(locale, "mainImage")
+              : task.role === "detail"
+                ? `${t(locale, "detailImage")} ${task.index}`
+                : `${t(locale, "cell")} ${task.index + 1}`}
           </span>
           <strong>{directionTitle}</strong>
         </div>

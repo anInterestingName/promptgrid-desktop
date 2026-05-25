@@ -104,6 +104,9 @@ Start the desktop app:
 npm run tauri:dev
 ```
 
+The desktop dev server uses a separate Vite port at `http://127.0.0.1:1421`,
+so it can run alongside the browser UI.
+
 Build the frontend:
 
 ```bash
@@ -120,6 +123,7 @@ npm run tauri:build
 
 ```text
 npm run dev          Start the Vite web UI at http://127.0.0.1:1420
+npm run dev:tauri-ui Start the Vite UI used by Tauri at http://127.0.0.1:1421
 npm run build        Type-check and build the frontend
 npm run preview      Preview the production frontend build
 npm run tauri        Run the Tauri CLI

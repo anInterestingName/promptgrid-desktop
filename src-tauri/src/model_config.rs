@@ -1043,6 +1043,8 @@ fn extract_text_output(response_json: &Value) -> Option<String> {
                 .filter_map(|content_item| {
                     content_item
                         .get("text")
+                        .or_else(|| content_item.get("output_text"))
+                        .or_else(|| content_item.get("content"))
                         .and_then(Value::as_str)
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
@@ -1064,7 +1066,8 @@ fn parse_responses_api_body(response_text: &str) -> Result<Value, serde_json::Er
         return Ok(response_json);
     }
 
-    let mut output_text = String::new();
+    let mut delta_output_text = String::new();
+    let mut final_output_text = String::new();
     let mut output = Vec::new();
 
     for line in response_text.lines() {
@@ -1081,12 +1084,44 @@ fn parse_responses_api_body(response_text: &str) -> Result<Value, serde_json::Er
         match event.get("type").and_then(Value::as_str) {
             Some("response.output_text.delta") => {
                 if let Some(delta) = event.get("delta").and_then(Value::as_str) {
-                    output_text.push_str(delta);
+                    delta_output_text.push_str(delta);
+                }
+            }
+            Some("response.output_text.done") => {
+                if let Some(text) = event.get("text").and_then(Value::as_str) {
+                    final_output_text = text.to_string();
+                }
+            }
+            Some("response.content_part.done") => {
+                if let Some(text) = event
+                    .get("part")
+                    .and_then(|part| part.get("text"))
+                    .and_then(Value::as_str)
+                {
+                    final_output_text = text.to_string();
+                }
+            }
+            Some("response.output_item.done") => {
+                if let Some(item) = event.get("item") {
+                    if let Some(text) = extract_text_output(item) {
+                        final_output_text = text;
+                    } else {
+                        output.push(item.clone());
+                    }
                 }
             }
             Some("response.completed") => {
                 if let Some(response) = event.get("response") {
-                    return Ok(response.clone());
+                    let output_text = if final_output_text.trim().is_empty() {
+                        delta_output_text.as_str()
+                    } else {
+                        final_output_text.as_str()
+                    };
+                    return Ok(merge_stream_text_into_response(
+                        response.clone(),
+                        output_text,
+                        &output,
+                    ));
                 }
             }
             Some(event_type) if event_type.contains("image_generation_call") => {
@@ -1104,9 +1139,50 @@ fn parse_responses_api_body(response_text: &str) -> Result<Value, serde_json::Er
     }
 
     Ok(json!({
-        "output_text": output_text,
+        "output_text": if final_output_text.trim().is_empty() {
+            delta_output_text
+        } else {
+            final_output_text
+        },
         "output": output
     }))
+}
+
+fn merge_stream_text_into_response(
+    mut response: Value,
+    output_text: &str,
+    output: &[Value],
+) -> Value {
+    if extract_text_output(&response).is_some() {
+        return response;
+    }
+
+    let trimmed_output_text = output_text.trim();
+    if trimmed_output_text.is_empty() && output.is_empty() {
+        return response;
+    }
+
+    let should_insert_output = !output.is_empty()
+        && response
+            .get("output")
+            .and_then(Value::as_array)
+            .map(Vec::is_empty)
+            .unwrap_or(true);
+
+    if let Some(response_object) = response.as_object_mut() {
+        if !trimmed_output_text.is_empty() {
+            response_object.insert(
+                "output_text".to_string(),
+                Value::String(trimmed_output_text.to_string()),
+            );
+        }
+
+        if should_insert_output {
+            response_object.insert("output".to_string(), Value::Array(output.to_vec()));
+        }
+    }
+
+    response
 }
 
 fn build_prompt_analysis_input(request: &PromptAnalyzeRequest, grid_size: usize) -> String {
@@ -1379,4 +1455,44 @@ fn summarize_response_error(response_text: &str) -> String {
     }
 
     trimmed.chars().take(240).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_stream_text_when_completed_response_has_empty_output() {
+        let response_text = r#"event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"OK"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}
+"#;
+
+        let response_json = parse_responses_api_body(response_text).unwrap();
+        assert_eq!(extract_text_output(&response_json).as_deref(), Some("OK"));
+    }
+
+    #[test]
+    fn does_not_duplicate_stream_text_from_delta_done_and_item_done() {
+        let response_text = r#"event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"{\"directions\":[]}"}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","text":"{\"directions\":[]}"}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"message","content":[{"type":"output_text","text":"{\"directions\":[]}"}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}
+"#;
+
+        let response_json = parse_responses_api_body(response_text).unwrap();
+        assert_eq!(
+            extract_text_output(&response_json).as_deref(),
+            Some("{\"directions\":[]}")
+        );
+    }
 }

@@ -73,6 +73,18 @@ export async function pickDataDirectory(): Promise<string | null> {
   return invoke<string | null>("pick_data_directory");
 }
 
+export async function openProjectFolder(project: Project): Promise<void> {
+  if (!isTauri()) {
+    throw new Error("Open project folder is only available in the desktop app.");
+  }
+
+  await invoke("open_project_folder", {
+    projectId: project.id,
+    projectTitle: project.title,
+    projectDirectory: project.projectDirectory ?? null,
+  });
+}
+
 export async function saveGeneratedImage({
   imageDataUrl,
   project,

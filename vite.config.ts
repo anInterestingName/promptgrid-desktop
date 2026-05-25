@@ -856,7 +856,11 @@ function extractTextOutput(responseJson: unknown) {
           }
 
           const value = (contentItem as { text?: unknown }).text;
-          return typeof value === "string" ? value.trim() : "";
+          const fallbackValue =
+            value ??
+            (contentItem as { output_text?: unknown }).output_text ??
+            (contentItem as { content?: unknown }).content;
+          return typeof fallbackValue === "string" ? fallbackValue.trim() : "";
         })
         .filter(Boolean)
         .join("\n");
@@ -884,7 +888,8 @@ function parseResponsesBody(responseText: string) {
 }
 
 function parseResponsesStream(responseText: string) {
-  let outputText = "";
+  let deltaOutputText = "";
+  let finalOutputText = "";
   const output: unknown[] = [];
 
   for (const data of readResponseStreamEvents(responseText)) {
@@ -898,6 +903,7 @@ function parseResponsesStream(responseText: string) {
       item?: unknown;
       response?: unknown;
       result?: unknown;
+      text?: unknown;
       type?: unknown;
     };
     try {
@@ -907,19 +913,49 @@ function parseResponsesStream(responseText: string) {
     }
 
     if (event.type === "response.output_text.delta") {
-      outputText += typeof event.delta === "string" ? event.delta : "";
+      deltaOutputText += typeof event.delta === "string" ? event.delta : "";
+      continue;
+    }
+
+    if (event.type === "response.output_text.done") {
+      finalOutputText =
+        typeof event.text === "string" ? event.text : finalOutputText;
+      continue;
+    }
+
+    if (event.type === "response.content_part.done") {
+      const partText = extractTextContent((event as { part?: unknown }).part);
+      if (partText) {
+        finalOutputText = partText;
+      }
       continue;
     }
 
     if (event.type === "response.completed" && event.response) {
-      return event.response;
+      return mergeStreamTextIntoResponse(
+        event.response,
+        finalOutputText || deltaOutputText,
+        output,
+      );
     }
 
-    if (
-      typeof event.type === "string" &&
-      (event.type.includes("image_generation_call") ||
-        event.type === "response.output_item.done")
-    ) {
+    if (event.type === "response.output_item.done" && event.item) {
+      const itemText = extractTextOutput(event.item);
+      if (itemText) {
+        finalOutputText = itemText;
+      }
+      if (hasEventItemResult(event.item)) {
+        output.push({
+          type: "image_generation_call",
+          result: event.item.result,
+        });
+      } else if (!itemText) {
+        output.push(event.item);
+      }
+      continue;
+    }
+
+    if (typeof event.type === "string" && event.type.includes("image_generation_call")) {
       if (typeof event.result === "string") {
         output.push({
           type: "image_generation_call",
@@ -930,19 +966,45 @@ function parseResponsesStream(responseText: string) {
           type: "image_generation_call",
           result: event.item.result,
         });
-      } else if (
-        event.type !== "response.image_generation_call.partial_image" &&
-        event.item
-      ) {
+      } else if (event.type !== "response.image_generation_call.partial_image" && event.item) {
         output.push(event.item);
       }
     }
   }
 
   return {
-    output_text: outputText,
+    output_text: finalOutputText || deltaOutputText,
     output,
   };
+}
+
+function mergeStreamTextIntoResponse(
+  response: unknown,
+  outputText: string,
+  output: unknown[],
+) {
+  if (!response || typeof response !== "object") {
+    return response;
+  }
+
+  if (extractTextOutput(response)) {
+    return response;
+  }
+
+  const nextResponse = { ...(response as Record<string, unknown>) };
+  const trimmedOutputText = outputText.trim();
+  if (trimmedOutputText) {
+    nextResponse.output_text = trimmedOutputText;
+  }
+
+  const existingOutput = Array.isArray(nextResponse.output)
+    ? nextResponse.output
+    : [];
+  if (existingOutput.length === 0 && output.length > 0) {
+    nextResponse.output = output;
+  }
+
+  return nextResponse;
 }
 
 function readResponseStreamEvents(responseText: string) {

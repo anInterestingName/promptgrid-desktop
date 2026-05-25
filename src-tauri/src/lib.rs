@@ -71,6 +71,57 @@ async fn open_debug_log_folder(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn open_project_folder(
+    _app: tauri::AppHandle,
+    store: State<'_, LocalStore>,
+    project_id: String,
+    project_title: String,
+    project_directory: Option<String>,
+) -> Result<(), String> {
+    let store = store.inner().clone();
+    let project_directory = run_blocking(move || {
+        storage::project_directory(
+            &store,
+            &project_id,
+            &project_title,
+            project_directory.as_deref(),
+        )
+    })
+    .await?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let explorer_path = std::env::var_os("WINDIR")
+            .map(std::path::PathBuf::from)
+            .map(|path| path.join("explorer.exe"))
+            .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows\explorer.exe"));
+        let explorer_result = std::process::Command::new(&explorer_path)
+            .arg(project_directory.as_os_str())
+            .spawn();
+
+        match explorer_result {
+            Ok(_) => Ok(()),
+            Err(explorer_error) => _app
+                .opener()
+                .open_path(project_directory.to_string_lossy().into_owned(), None::<&str>)
+                .map_err(|opener_error| {
+                    format!(
+                        "Could not open project folder with {}: {explorer_error}; opener fallback failed: {opener_error}",
+                        explorer_path.to_string_lossy()
+                    )
+                }),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        _app.opener()
+            .open_path(project_directory.to_string_lossy().into_owned(), None::<&str>)
+            .map_err(|error| format!("Could not open project folder: {error}"))
+    }
+}
+
+#[tauri::command]
 async fn save_provider_api_key(provider: String, api_key: String) -> Result<bool, String> {
     run_blocking(move || model_config::save_provider_api_key(&provider, &api_key)).await
 }
@@ -130,6 +181,7 @@ pub fn run() {
             pick_data_directory,
             configure_debug_logging,
             open_debug_log_folder,
+            open_project_folder,
             save_provider_api_key,
             clear_provider_api_key,
             fetch_provider_models,

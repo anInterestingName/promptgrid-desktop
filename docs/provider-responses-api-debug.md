@@ -1,0 +1,101 @@
+# Provider Responses API Debug Notes
+
+This document records observed raw request/response shapes for provider calls.
+Keep API keys and authorization headers out of this file.
+
+## Text Model Test
+
+Source: Tauri debug log `provider-requests-YYYY-MM-DD.jsonl`
+
+Operation: `test_text_model`
+
+Observed on: 2026-05-25
+
+Provider/model: custom provider at `lyapi.cloud`, `gpt-5.5`
+
+Request:
+
+```json
+{
+  "method": "POST",
+  "url": "https://lyapi.cloud/v1/responses",
+  "body": {
+    "model": "gpt-5.5",
+    "input": "Reply with exactly: OK",
+    "reasoning": {
+      "effort": "xhigh"
+    },
+    "stream": true
+  }
+}
+```
+
+Observed response shape:
+
+```text
+event: response.output_text.delta
+data: {"type":"response.output_text.delta","delta":"OK"}
+
+event: response.output_text.done
+data: {"type":"response.output_text.done","text":"OK"}
+
+event: response.content_part.done
+data: {"type":"response.content_part.done","part":{"type":"output_text","text":"OK"}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","item":{"type":"message","status":"completed","content":[{"type":"output_text","text":"OK"}]}}
+
+event: response.completed
+data: {"type":"response.completed","response":{"status":"completed","output":[]}}
+```
+
+Important compatibility note:
+
+Some compatible providers send useful text in streaming events, but the final
+`response.completed.response.output` may be an empty array. The parser must not
+discard text accumulated from earlier stream events when the completed response
+has no extractable text.
+
+The same final text may appear in multiple stream events, including `delta`,
+`done`, and `output_item.done`. The parser should treat `delta` as a fallback
+stream accumulator and prefer the complete text from `done`/`output_item.done`
+when present. Do not concatenate all three sources, or strict JSON parsing may
+fail with trailing characters because the same JSON object was duplicated.
+
+The parser should accept text from:
+
+- `response.output_text.delta.delta`
+- `response.output_text.done.text`
+- `response.content_part.done.part.text`
+- `response.output_item.done.item.content[].text`
+- non-streaming `response.output_text`
+- non-streaming `response.output[].content[].text`
+
+## Debug Log Location
+
+Tauri initializes provider logs under the app log directory:
+
+```text
+%LOCALAPPDATA%\com.promptgrid.desktop\logs\debug-requests
+```
+
+File pattern:
+
+```text
+provider-requests-YYYY-MM-DD.jsonl
+```
+
+Each entry includes a sanitized `request` and `response`. Sensitive keys are
+redacted by `debug_log.rs`.
+
+## Related Fix
+
+`parse_responses_api_body` now merges accumulated stream text back into the final
+`response.completed` body when the completed body has no extractable text. This
+prevents false `Prompt analysis returned an empty response` errors for providers
+that emit an empty final `output` array.
+
+The browser development path uses the Vite proxy parser in `vite.config.ts`,
+while the desktop Tauri path uses `src-tauri/src/model_config.rs`. Keep both
+parsers aligned when adding provider compatibility handling. A mismatch can make
+the in-browser app fail even when the packaged desktop command works.
