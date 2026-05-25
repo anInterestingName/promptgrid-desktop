@@ -1,8 +1,13 @@
+import { appendFile, mkdir, readdir, rm, stat } from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { join } from "node:path";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 
 const host = process.env.TAURI_DEV_HOST ?? "127.0.0.1";
+const debugLogDir = join(process.cwd(), ".promptgrid-debug-logs");
+const maxLogStringLength = 12_000;
+const debugLogPrefix = "provider-requests";
 
 export default defineConfig({
   plugins: [react(), devProviderProxy()],
@@ -37,6 +42,8 @@ type DevProviderProxyRequest = {
   style?: string;
   streamResponses?: boolean;
   textModel?: string;
+  debugLoggingEnabled?: boolean;
+  debugLogRetentionDays?: number;
 };
 
 type ProviderModel = {
@@ -95,23 +102,28 @@ async function handleAnalyzePrompts(
   const body = await readJsonBody(request);
   const model = requireField(body.textModel, "Text model");
   const gridSize = Math.max(1, Math.min(25, Number(body.gridSize) || 9));
-  const providerResponse = await fetch(
-    buildResponsesUrl(requireField(body.baseUrl, "Base URL")),
+  const providerRequestBody = withRuntimeParameters(
     {
+      model,
+      input: buildPromptAnalysisInput(body, gridSize),
+    },
+    body,
+  );
+  const requestUrl = buildResponsesUrl(requireField(body.baseUrl, "Base URL"));
+  const { providerResponse, responseText } = await fetchProviderWithDebugLog({
+    debugConfig: getDebugLoggingConfig(body),
+    operation: "analyze_prompt_directions",
+    provider: body.provider,
+    model,
+    method: "POST",
+    url: requestUrl,
+    requestBody: providerRequestBody,
+    fetchOptions: {
       method: "POST",
       headers: buildProviderHeaders(body),
-      body: JSON.stringify(
-        withRuntimeParameters(
-          {
-            model,
-            input: buildPromptAnalysisInput(body, gridSize),
-          },
-          body,
-        ),
-      ),
+      body: JSON.stringify(providerRequestBody),
     },
-  );
-  const responseText = await providerResponse.text();
+  });
 
   if (!providerResponse.ok) {
     throw new Error(
@@ -132,33 +144,38 @@ async function handleGenerateImage(
 ) {
   const body = await readJsonBody(request);
   const model = requireField(body.imageModel, "Image model");
-  const providerResponse = await fetch(
-    buildResponsesUrl(requireField(body.baseUrl, "Base URL")),
+  const providerRequestBody = withRuntimeParameters(
     {
-      method: "POST",
-      headers: buildProviderHeaders(body),
-      body: JSON.stringify(
-        withRuntimeParameters(
-          {
-            model,
-            input: requireField(body.prompt, "Image prompt"),
-            tools: [
-              buildImageGenerationTool(body),
-            ],
-            tool_choice: {
-              type: "image_generation",
-            },
-          },
-          {
-            ...body,
-            reasoningEnabled: false,
-            streamResponses: true,
-          },
-        ),
-      ),
+      model,
+      input: requireField(body.prompt, "Image prompt"),
+      tools: [
+        buildImageGenerationTool(body),
+      ],
+      tool_choice: {
+        type: "image_generation",
+      },
+    },
+    {
+      ...body,
+      reasoningEnabled: false,
+      streamResponses: true,
     },
   );
-  const responseText = await providerResponse.text();
+  const requestUrl = buildResponsesUrl(requireField(body.baseUrl, "Base URL"));
+  const { providerResponse, responseText } = await fetchProviderWithDebugLog({
+    debugConfig: getDebugLoggingConfig(body),
+    operation: "generate_prompt_image",
+    provider: body.provider,
+    model,
+    method: "POST",
+    url: requestUrl,
+    requestBody: providerRequestBody,
+    fetchOptions: {
+      method: "POST",
+      headers: buildProviderHeaders(body),
+      body: JSON.stringify(providerRequestBody),
+    },
+  });
 
   if (!providerResponse.ok) {
     throw new Error(
@@ -202,13 +219,17 @@ async function handleProviderModels(
   response: ServerResponse,
 ) {
   const body = await readJsonBody(request);
-  const providerResponse = await fetch(
-    buildModelsUrl(requireField(body.baseUrl, "Base URL")),
-    {
+  const requestUrl = buildModelsUrl(requireField(body.baseUrl, "Base URL"));
+  const { providerResponse, responseText } = await fetchProviderWithDebugLog({
+    debugConfig: getDebugLoggingConfig(body),
+    operation: "fetch_provider_models",
+    provider: body.provider,
+    method: "GET",
+    url: requestUrl,
+    fetchOptions: {
       headers: buildProviderHeaders(body),
     },
-  );
-  const responseText = await providerResponse.text();
+  });
 
   if (!providerResponse.ok) {
     throw new Error(
@@ -254,23 +275,28 @@ async function handleTextModelTest(
   response: ServerResponse,
 ) {
   const model = requireField(body.model, "Text model");
-  const providerResponse = await fetch(
-    buildResponsesUrl(requireField(body.baseUrl, "Base URL")),
+  const providerRequestBody = withRuntimeParameters(
     {
+      model,
+      input: "Reply with exactly: OK",
+    },
+    body,
+  );
+  const requestUrl = buildResponsesUrl(requireField(body.baseUrl, "Base URL"));
+  const { providerResponse, responseText } = await fetchProviderWithDebugLog({
+    debugConfig: getDebugLoggingConfig(body),
+    operation: "test_text_model",
+    provider: body.provider,
+    model,
+    method: "POST",
+    url: requestUrl,
+    requestBody: providerRequestBody,
+    fetchOptions: {
       method: "POST",
       headers: buildProviderHeaders(body),
-      body: JSON.stringify(
-        withRuntimeParameters(
-          {
-            model,
-            input: "Reply with exactly: OK",
-          },
-          body,
-        ),
-      ),
+      body: JSON.stringify(providerRequestBody),
     },
-  );
-  const responseText = await providerResponse.text();
+  });
 
   if (!providerResponse.ok) {
     throw new Error(
@@ -297,32 +323,37 @@ async function handleImageModelTest(
   response: ServerResponse,
 ) {
   const model = requireField(body.model, "Image model");
-  const providerResponse = await fetch(
-    buildResponsesUrl(requireField(body.baseUrl, "Base URL")),
+  const providerRequestBody = withRuntimeParameters(
     {
+      model,
+      input:
+        "Generate a simple image of a small blue square on a white background.",
+      tools: [
+        {
+          type: "image_generation",
+        },
+      ],
+      tool_choice: {
+        type: "image_generation",
+      },
+    },
+    { ...body, streamResponses: false },
+  );
+  const requestUrl = buildResponsesUrl(requireField(body.baseUrl, "Base URL"));
+  const { providerResponse, responseText } = await fetchProviderWithDebugLog({
+    debugConfig: getDebugLoggingConfig(body),
+    operation: "test_image_model",
+    provider: body.provider,
+    model,
+    method: "POST",
+    url: requestUrl,
+    requestBody: providerRequestBody,
+    fetchOptions: {
       method: "POST",
       headers: buildProviderHeaders(body),
-      body: JSON.stringify(
-        withRuntimeParameters(
-          {
-            model,
-            input:
-              "Generate a simple image of a small blue square on a white background.",
-            tools: [
-              {
-                type: "image_generation",
-              },
-            ],
-            tool_choice: {
-              type: "image_generation",
-            },
-          },
-          { ...body, streamResponses: false },
-        ),
-      ),
+      body: JSON.stringify(providerRequestBody),
     },
-  );
-  const responseText = await providerResponse.text();
+  });
 
   if (!providerResponse.ok) {
     throw new Error(
@@ -545,6 +576,195 @@ function buildProviderHeaders(request: DevProviderProxyRequest) {
   }
 
   return headers;
+}
+
+async function fetchProviderWithDebugLog({
+  fetchOptions,
+  debugConfig,
+  method,
+  model,
+  operation,
+  provider,
+  requestBody,
+  url,
+}: {
+  debugConfig: DebugLoggingConfig;
+  fetchOptions: RequestInit;
+  method: string;
+  model?: string;
+  operation: string;
+  provider?: string;
+  requestBody?: unknown;
+  url: string;
+}) {
+  const startedAt = Date.now();
+
+  try {
+    const providerResponse = await fetch(url, fetchOptions);
+    const responseText = await providerResponse.text();
+    if (debugConfig.enabled) {
+      await appendDebugLogEntry(
+        {
+          durationMs: Date.now() - startedAt,
+          method,
+          model,
+          ok: providerResponse.ok,
+          operation,
+          provider,
+          request: requestBody ?? null,
+          response: responseTextToLogValue(responseText),
+          status: providerResponse.status,
+          timestampMs: Date.now(),
+          url,
+        },
+        debugConfig.retentionDays,
+      );
+    }
+
+    return { providerResponse, responseText };
+  } catch (error) {
+    if (debugConfig.enabled) {
+      await appendDebugLogEntry(
+        {
+          durationMs: Date.now() - startedAt,
+          error: getErrorMessage(error),
+          method,
+          model,
+          ok: false,
+          operation,
+          provider,
+          request: requestBody ?? null,
+          response: null,
+          timestampMs: Date.now(),
+          url,
+        },
+        debugConfig.retentionDays,
+      );
+    }
+    throw error;
+  }
+}
+
+type DebugLoggingConfig = {
+  enabled: boolean;
+  retentionDays: number;
+};
+
+async function appendDebugLogEntry(
+  entry: Record<string, unknown>,
+  retentionDays: number,
+) {
+  try {
+    await mkdir(debugLogDir, { recursive: true });
+    await cleanupDevDebugLogs(retentionDays);
+    await appendFile(
+      join(debugLogDir, `${debugLogPrefix}-${getDateStamp()}.jsonl`),
+      `${JSON.stringify(sanitizeLogValue(entry))}\n`,
+      "utf8",
+    );
+  } catch (error) {
+    console.warn(`Could not write debug request log: ${getErrorMessage(error)}`);
+  }
+}
+
+function getDebugLoggingConfig(requestBody: unknown) {
+  if (!requestBody || typeof requestBody !== "object") {
+    return { enabled: false, retentionDays: 7 };
+  }
+
+  const config = requestBody as {
+    debugLogRetentionDays?: unknown;
+    debugLoggingEnabled?: unknown;
+  };
+  const retentionDays =
+    typeof config.debugLogRetentionDays === "number"
+      ? Math.round(config.debugLogRetentionDays)
+      : 7;
+
+  return {
+    enabled: config.debugLoggingEnabled === true,
+    retentionDays: Math.min(365, Math.max(1, retentionDays || 7)),
+  };
+}
+
+async function cleanupDevDebugLogs(retentionDays: number) {
+  const maxAgeMs = retentionDays * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+
+  try {
+    const entries = await readdir(debugLogDir);
+    await Promise.all(
+      entries
+        .filter(
+          (entry) =>
+            entry.startsWith(`${debugLogPrefix}-`) && entry.endsWith(".jsonl"),
+        )
+        .map(async (entry) => {
+          const path = join(debugLogDir, entry);
+          const metadata = await stat(path);
+          if (now - metadata.mtimeMs > maxAgeMs) {
+            await rm(path, { force: true });
+          }
+        }),
+    );
+  } catch {
+    // Missing debug log folders are fine during normal development.
+  }
+}
+
+function getDateStamp() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function responseTextToLogValue(responseText: string) {
+  try {
+    return sanitizeLogValue(JSON.parse(responseText) as unknown);
+  } catch {
+    return truncateLogString(responseText);
+  }
+}
+
+function sanitizeLogValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sanitizeLogValue);
+  }
+
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nestedValue]) => [
+        key,
+        isSensitiveLogKey(key) ? "[redacted]" : sanitizeLogValue(nestedValue),
+      ]),
+    );
+  }
+
+  if (typeof value === "string") {
+    return truncateLogString(value);
+  }
+
+  return value;
+}
+
+function isSensitiveLogKey(key: string) {
+  const normalizedKey = key.toLowerCase();
+  return (
+    normalizedKey.includes("authorization") ||
+    normalizedKey.includes("apikey") ||
+    normalizedKey.includes("api_key") ||
+    normalizedKey.includes("token") ||
+    normalizedKey.includes("secret") ||
+    normalizedKey === "key"
+  );
+}
+
+function truncateLogString(value: string) {
+  if (value.length <= maxLogStringLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLogStringLength)}\n[truncated ${
+    value.length - maxLogStringLength
+  } chars]`;
 }
 
 function parseCustomHeaders(rawHeaders?: string) {

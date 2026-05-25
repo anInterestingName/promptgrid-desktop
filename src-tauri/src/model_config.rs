@@ -7,7 +7,7 @@ use reqwest::header::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const SECRET_SERVICE: &str = "PromptGrid Desktop";
 
@@ -168,19 +168,47 @@ pub fn fetch_provider_models(request: ModelFetchRequest) -> Result<Vec<ModelOpti
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|error| format!("Could not create HTTP client: {error}"))?;
+    let started_at = Instant::now();
     let response = client
-        .get(models_url)
+        .get(&models_url)
         .headers(headers)
         .send()
-        .map_err(|error| format!("Could not fetch model list: {error}"))?;
+        .map_err(|error| {
+            let message = format!("Could not fetch model list: {error}");
+            crate::debug_log::log_provider_request(
+                "fetch_provider_models",
+                Some(&request.provider),
+                None,
+                "GET",
+                &models_url,
+                None,
+                None,
+                None,
+                started_at.elapsed().as_millis(),
+                Some(&message),
+            );
+            message
+        })?;
     let status = response.status();
+    let response_text = read_response_text(response, "model list response")?;
+    crate::debug_log::log_provider_request(
+        "fetch_provider_models",
+        Some(&request.provider),
+        None,
+        "GET",
+        &models_url,
+        None,
+        Some(&response_text),
+        Some(status.as_u16()),
+        started_at.elapsed().as_millis(),
+        None,
+    );
 
     if !status.is_success() {
         return Err(format!("Model list request failed with HTTP {status}"));
     }
 
-    let mut models = response
-        .json::<ModelsResponse>()
+    let mut models = serde_json::from_str::<ModelsResponse>(&response_text)
         .map_err(|error| format!("Could not parse model list: {error}"))?
         .data
         .into_iter()
@@ -262,15 +290,44 @@ pub fn analyze_prompt_directions(
         request.response_verbosity.as_deref(),
         request.stream_responses,
     );
+    let responses_url = build_responses_url(&request.base_url)?;
+    let started_at = Instant::now();
 
     let response = client
-        .post(build_responses_url(&request.base_url)?)
+        .post(&responses_url)
         .headers(headers)
         .json(&body)
         .send()
-        .map_err(|error| format!("Could not analyze prompt directions: {error}"))?;
+        .map_err(|error| {
+            let message = format!("Could not analyze prompt directions: {error}");
+            crate::debug_log::log_provider_request(
+                "analyze_prompt_directions",
+                Some(&request.provider),
+                Some(model),
+                "POST",
+                &responses_url,
+                Some(&body),
+                None,
+                None,
+                started_at.elapsed().as_millis(),
+                Some(&message),
+            );
+            message
+        })?;
     let status = response.status();
     let response_text = read_response_text(response, "prompt analysis response")?;
+    crate::debug_log::log_provider_request(
+        "analyze_prompt_directions",
+        Some(&request.provider),
+        Some(model),
+        "POST",
+        &responses_url,
+        Some(&body),
+        Some(&response_text),
+        Some(status.as_u16()),
+        started_at.elapsed().as_millis(),
+        None,
+    );
 
     if !status.is_success() {
         return Err(format!(
@@ -335,13 +392,30 @@ pub fn generate_prompt_image(request: ImageGenerateRequest) -> Result<GeneratedI
         request.response_verbosity.as_deref(),
         true,
     );
+    let responses_url = build_responses_url(&request.base_url)?;
+    let started_at = Instant::now();
 
     let response = client
-        .post(build_responses_url(&request.base_url)?)
+        .post(&responses_url)
         .headers(headers)
         .json(&body)
         .send()
-        .map_err(|error| format!("Could not generate image: {error}"))?;
+        .map_err(|error| {
+            let message = format!("Could not generate image: {error}");
+            crate::debug_log::log_provider_request(
+                "generate_prompt_image",
+                Some(&request.provider),
+                Some(model),
+                "POST",
+                &responses_url,
+                Some(&body),
+                None,
+                None,
+                started_at.elapsed().as_millis(),
+                Some(&message),
+            );
+            message
+        })?;
     let status = response.status();
     let content_type = header_value(response.headers(), CONTENT_TYPE);
 
@@ -352,6 +426,18 @@ pub fn generate_prompt_image(request: ImageGenerateRequest) -> Result<GeneratedI
     {
         if !status.is_success() {
             let response_text = read_response_text(response, "image generation response")?;
+            crate::debug_log::log_provider_request(
+                "generate_prompt_image",
+                Some(&request.provider),
+                Some(model),
+                "POST",
+                &responses_url,
+                Some(&body),
+                Some(&response_text),
+                Some(status.as_u16()),
+                started_at.elapsed().as_millis(),
+                None,
+            );
             return Err(format!(
                 "Image generation failed with HTTP {status}: {}",
                 summarize_response_error(&response_text)
@@ -359,12 +445,36 @@ pub fn generate_prompt_image(request: ImageGenerateRequest) -> Result<GeneratedI
         }
 
         let image_base64 = read_image_generation_stream(response)?;
+        crate::debug_log::log_provider_request(
+            "generate_prompt_image",
+            Some(&request.provider),
+            Some(model),
+            "POST",
+            &responses_url,
+            Some(&body),
+            Some(&json!({ "imageBase64": image_base64 }).to_string()),
+            Some(status.as_u16()),
+            started_at.elapsed().as_millis(),
+            None,
+        );
         return Ok(GeneratedImage {
             image_data_url: format!("data:image/png;base64,{image_base64}"),
         });
     }
 
     let response_text = read_response_text(response, "image generation response")?;
+    crate::debug_log::log_provider_request(
+        "generate_prompt_image",
+        Some(&request.provider),
+        Some(model),
+        "POST",
+        &responses_url,
+        Some(&body),
+        Some(&response_text),
+        Some(status.as_u16()),
+        started_at.elapsed().as_millis(),
+        None,
+    );
     if !status.is_success() {
         return Err(format!(
             "Image generation failed with HTTP {status}: {}",
@@ -401,14 +511,42 @@ fn test_text_model(
         request.response_verbosity.as_deref(),
         request.stream_responses,
     );
+    let started_at = Instant::now();
     let response = client
-        .post(responses_url)
+        .post(&responses_url)
         .headers(headers)
         .json(&body)
         .send()
-        .map_err(|error| format!("Could not test model connection: {error}"))?;
+        .map_err(|error| {
+            let message = format!("Could not test model connection: {error}");
+            crate::debug_log::log_provider_request(
+                "test_text_model",
+                Some(&request.provider),
+                Some(model),
+                "POST",
+                &responses_url,
+                Some(&body),
+                None,
+                None,
+                started_at.elapsed().as_millis(),
+                Some(&message),
+            );
+            message
+        })?;
     let status = response.status();
     let response_text = read_response_text(response, "model test response")?;
+    crate::debug_log::log_provider_request(
+        "test_text_model",
+        Some(&request.provider),
+        Some(model),
+        "POST",
+        &responses_url,
+        Some(&body),
+        Some(&response_text),
+        Some(status.as_u16()),
+        started_at.elapsed().as_millis(),
+        None,
+    );
 
     if !status.is_success() {
         return Err(format!(
@@ -455,14 +593,42 @@ fn test_image_model(
         request.response_verbosity.as_deref(),
         false,
     );
+    let started_at = Instant::now();
     let response = client
-        .post(responses_url)
+        .post(&responses_url)
         .headers(headers)
         .json(&body)
         .send()
-        .map_err(|error| format!("Could not test image model connection: {error}"))?;
+        .map_err(|error| {
+            let message = format!("Could not test image model connection: {error}");
+            crate::debug_log::log_provider_request(
+                "test_image_model",
+                Some(&request.provider),
+                Some(model),
+                "POST",
+                &responses_url,
+                Some(&body),
+                None,
+                None,
+                started_at.elapsed().as_millis(),
+                Some(&message),
+            );
+            message
+        })?;
     let status = response.status();
     let response_text = read_response_text(response, "image model test response")?;
+    crate::debug_log::log_provider_request(
+        "test_image_model",
+        Some(&request.provider),
+        Some(model),
+        "POST",
+        &responses_url,
+        Some(&body),
+        Some(&response_text),
+        Some(status.as_u16()),
+        started_at.elapsed().as_millis(),
+        None,
+    );
 
     if !status.is_success() {
         return Err(format!(

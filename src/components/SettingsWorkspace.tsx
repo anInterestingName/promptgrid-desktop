@@ -5,6 +5,7 @@ import {
   ChevronDown,
   Cpu,
   Database,
+  FileText,
   Eye,
   EyeOff,
   Folder,
@@ -27,6 +28,7 @@ import {
   saveProviderApiKey,
   testProviderConnection,
 } from "../services/modelConfig";
+import { openDebugLogFolder } from "../services/debugLogging";
 import {
   getStorageInfo,
   pickDataDirectory,
@@ -120,6 +122,9 @@ export function SettingsWorkspace() {
   const [storageActionStatus, setStorageActionStatus] =
     useState<StorageActionStatus>("idle");
   const [storageNotice, setStorageNotice] = useState<ModelNotice | null>(null);
+  const [debugLogStatus, setDebugLogStatus] =
+    useState<StorageActionStatus>("idle");
+  const [debugLogNotice, setDebugLogNotice] = useState<ModelNotice | null>(null);
 
   const updateSetting = <Key extends keyof AppSettings>(
     key: Key,
@@ -137,8 +142,16 @@ export function SettingsWorkspace() {
           : settings.customBaseUrl ?? "",
       customHeaders:
         provider === "custom" ? settings.customHeaders : undefined,
+      debugLoggingEnabled: settings.debugLoggingEnabled,
+      debugLogRetentionDays: settings.debugLogRetentionDays,
     }),
-    [settings.customBaseUrl, settings.customHeaders, settings.openAiBaseUrl],
+    [
+      settings.customBaseUrl,
+      settings.customHeaders,
+      settings.debugLogRetentionDays,
+      settings.debugLoggingEnabled,
+      settings.openAiBaseUrl,
+    ],
   );
 
   useEffect(() => {
@@ -491,6 +504,23 @@ export function SettingsWorkspace() {
     }
   };
 
+  const viewDebugLogs = async () => {
+    setDebugLogStatus("loading");
+    setDebugLogNotice(null);
+
+    try {
+      await openDebugLogFolder();
+      setDebugLogStatus("ready");
+    } catch (error) {
+      setDebugLogStatus("error");
+      setDebugLogNotice({
+        titleKey: "debugLogOpenError",
+        tone: "error",
+        message: getErrorMessage(error),
+      });
+    }
+  };
+
   return (
     <section
       className="settings-workspace"
@@ -837,6 +867,61 @@ export function SettingsWorkspace() {
                 </button>
               ))}
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="settings-section">
+        <SectionHeader icon={FileText} locale={locale} titleKey="debugLogSettings" />
+        <SettingsNoticeSlot
+          locale={locale}
+          notice={debugLogNotice}
+          onDismiss={() => setDebugLogNotice(null)}
+        />
+        <div className="settings-fields">
+          <label className="settings-check">
+            <input
+              checked={settings.debugLoggingEnabled}
+              type="checkbox"
+              onChange={(event) =>
+                updateSetting("debugLoggingEnabled", event.target.checked)
+              }
+            />
+            <span>{t(locale, "debugLoggingEnabled")}</span>
+          </label>
+          <label className="settings-field">
+            <span>{t(locale, "debugLogRetentionDays")}</span>
+            <input
+              className="number-input"
+              min={1}
+              max={365}
+              type="number"
+              value={settings.debugLogRetentionDays}
+              onChange={(event) => {
+                const value = Number(event.target.value);
+                updateSetting(
+                  "debugLogRetentionDays",
+                  Math.min(365, Math.max(1, value || 1)),
+                );
+              }}
+            />
+          </label>
+          <p className="settings-help">{t(locale, "debugLogSettingsHint")}</p>
+          <div className="settings-actions-row">
+            <button
+              className="secondary-action compact-action"
+              disabled={debugLogStatus === "loading"}
+              type="button"
+              onClick={() => void viewDebugLogs()}
+            >
+              <Folder size={16} aria-hidden="true" />
+              {t(
+                locale,
+                debugLogStatus === "loading"
+                  ? "openingDebugLogs"
+                  : "viewDebugLogs",
+              )}
+            </button>
           </div>
         </div>
       </div>

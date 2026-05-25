@@ -54,6 +54,8 @@ export const mockSettings: AppSettings = {
   reasoningEffort: "medium",
   responseVerbosity: "medium",
   streamResponses: false,
+  debugLoggingEnabled: false,
+  debugLogRetentionDays: 7,
   maxConcurrency: 3,
   defaultGridSize: 9,
   defaultAspectRatio: "1:1",

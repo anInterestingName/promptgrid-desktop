@@ -12,6 +12,7 @@ import {
   saveGeneratedImage,
   saveWorkspaceSnapshot,
 } from "../services/localPersistence";
+import { configureDebugLogging } from "../services/debugLogging";
 import {
   analyzePromptDirections,
   generatePromptImage,
@@ -352,7 +353,15 @@ function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     ...mockSettings,
     ...settings,
     apiProvider,
+    debugLogRetentionDays: clampDebugLogRetentionDays(
+      settings.debugLogRetentionDays,
+    ),
   };
+}
+
+function clampDebugLogRetentionDays(value: unknown) {
+  const days = typeof value === "number" ? value : mockSettings.debugLogRetentionDays;
+  return Math.min(365, Math.max(1, Math.round(days || mockSettings.debugLogRetentionDays)));
 }
 
 function mergeProjectWithConversation(
@@ -1284,4 +1293,29 @@ usePromptGridStore.subscribe((state) => {
         }
       });
   }, 500);
+});
+
+let lastDebugLoggingSignature = "";
+
+usePromptGridStore.subscribe((state) => {
+  if (!state.isHydrated || state.isHydrating) {
+    return;
+  }
+
+  const retentionDays = clampDebugLogRetentionDays(
+    state.settings.debugLogRetentionDays,
+  );
+  const signature = JSON.stringify({
+    enabled: state.settings.debugLoggingEnabled,
+    retentionDays,
+  });
+  if (signature === lastDebugLoggingSignature) {
+    return;
+  }
+
+  lastDebugLoggingSignature = signature;
+  void configureDebugLogging({
+    enabled: state.settings.debugLoggingEnabled,
+    retentionDays,
+  }).catch(() => undefined);
 });

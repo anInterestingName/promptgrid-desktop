@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { configureDebugLogging } from "./debugLogging";
 import type { AppSettings, Project } from "../types";
 
 const DEV_SECRET_PREFIX = "promptgrid.dev.api-key";
@@ -43,6 +44,8 @@ type ProviderRuntime = {
   reasoningEffort: string;
   responseVerbosity: string;
   streamResponses: boolean;
+  debugLoggingEnabled: boolean;
+  debugLogRetentionDays: number;
 };
 
 export async function analyzePromptDirections(
@@ -59,6 +62,8 @@ export async function analyzePromptDirections(
     style: project.style,
     textModel: getConfiguredTextModel(settings),
   } satisfies AnalyzePromptRequest;
+
+  await ensureDebugLoggingConfigured(request);
 
   if (isTauri()) {
     return invoke<PromptAnalysisResult>("analyze_prompt_directions", { request });
@@ -81,11 +86,20 @@ export async function generatePromptImage(
     quality: project.quality,
   } satisfies GenerateImageRequest;
 
+  await ensureDebugLoggingConfigured(request);
+
   if (isTauri()) {
     return invoke<GeneratedImage>("generate_prompt_image", { request });
   }
 
   return requestDevAiProxy<GeneratedImage>("generate-image", request);
+}
+
+async function ensureDebugLoggingConfigured(request: ProviderRuntime) {
+  await configureDebugLogging({
+    enabled: request.debugLoggingEnabled,
+    retentionDays: request.debugLogRetentionDays,
+  });
 }
 
 function buildProviderRuntime(settings: AppSettings): ProviderRuntime {
@@ -102,6 +116,8 @@ function buildProviderRuntime(settings: AppSettings): ProviderRuntime {
     reasoningEffort: settings.reasoningEffort,
     responseVerbosity: settings.responseVerbosity,
     streamResponses: settings.streamResponses,
+    debugLoggingEnabled: settings.debugLoggingEnabled,
+    debugLogRetentionDays: settings.debugLogRetentionDays,
   };
 }
 

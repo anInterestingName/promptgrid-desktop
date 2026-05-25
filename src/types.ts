@@ -83,6 +83,8 @@ export type AppSettings = {
   reasoningEffort: ReasoningEffort;
   responseVerbosity: ResponseVerbosity;
   streamResponses: boolean;
+  debugLoggingEnabled: boolean;
+  debugLogRetentionDays: number;
   maxConcurrency: number;
   defaultGridSize: GridSize;
   defaultAspectRatio: AspectRatio;

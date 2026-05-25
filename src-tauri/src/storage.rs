@@ -76,6 +76,10 @@ pub struct AppSettings {
     response_verbosity: String,
     #[serde(default)]
     stream_responses: bool,
+    #[serde(default)]
+    debug_logging_enabled: bool,
+    #[serde(default = "default_debug_log_retention_days")]
+    debug_log_retention_days: i64,
     max_concurrency: i64,
     default_grid_size: i64,
     default_aspect_ratio: String,
@@ -1375,6 +1379,8 @@ fn default_settings() -> AppSettings {
         reasoning_effort: default_reasoning_effort(),
         response_verbosity: default_response_verbosity(),
         stream_responses: false,
+        debug_logging_enabled: false,
+        debug_log_retention_days: default_debug_log_retention_days(),
         max_concurrency: 3,
         default_grid_size: 9,
         default_aspect_ratio: "1:1".to_string(),
@@ -1396,6 +1402,10 @@ fn default_reasoning_effort() -> String {
 
 fn default_response_verbosity() -> String {
     "medium".to_string()
+}
+
+fn default_debug_log_retention_days() -> i64 {
+    7
 }
 
 fn migrate_legacy_api_keys(settings: &mut AppSettings) -> Result<(), String> {

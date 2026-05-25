@@ -1,3 +1,4 @@
+mod debug_log;
 mod model_config;
 mod storage;
 
@@ -7,6 +8,7 @@ use model_config::{
 };
 use storage::{AppSnapshot, LocalStore, SaveGeneratedImageRequest, SavedImage, StorageInfo};
 use tauri::{Manager, State};
+use tauri_plugin_opener::OpenerExt;
 
 async fn run_blocking<T, F>(operation: F) -> Result<T, String>
 where
@@ -56,6 +58,19 @@ async fn pick_data_directory() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+async fn configure_debug_logging(enabled: bool, retention_days: u64) -> Result<(), String> {
+    run_blocking(move || debug_log::configure_debug_logging(enabled, retention_days)).await
+}
+
+#[tauri::command]
+async fn open_debug_log_folder(app: tauri::AppHandle) -> Result<(), String> {
+    let log_dir = run_blocking(debug_log::debug_log_dir).await?;
+    app.opener()
+        .open_path(log_dir.to_string_lossy().into_owned(), None::<&str>)
+        .map_err(|error| format!("Could not open debug log folder: {error}"))
+}
+
+#[tauri::command]
 async fn save_provider_api_key(provider: String, api_key: String) -> Result<bool, String> {
     run_blocking(move || model_config::save_provider_api_key(&provider, &api_key)).await
 }
@@ -101,6 +116,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            debug_log::initialize_debug_logging(app.path().app_log_dir()?.join("debug-requests"));
             let local_store = LocalStore::new(app.handle())?;
             app.manage(local_store);
             Ok(())
@@ -112,6 +128,8 @@ pub fn run() {
             get_storage_info,
             set_data_directory,
             pick_data_directory,
+            configure_debug_logging,
+            open_debug_log_folder,
             save_provider_api_key,
             clear_provider_api_key,
             fetch_provider_models,

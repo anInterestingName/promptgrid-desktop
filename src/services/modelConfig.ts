@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { configureDebugLogging } from "./debugLogging";
 import type {
   ApiProvider,
   ModelOption,
@@ -12,6 +13,8 @@ export type ModelFetchRequest = {
   provider: ApiProvider;
   baseUrl: string;
   customHeaders?: string;
+  debugLoggingEnabled?: boolean;
+  debugLogRetentionDays?: number;
 };
 
 export type ModelTestRequest = ModelFetchRequest & {
@@ -59,6 +62,8 @@ export async function clearProviderApiKey(
 export async function fetchProviderModels(
   request: ModelFetchRequest,
 ): Promise<ModelOption[]> {
+  await ensureDebugLoggingConfigured(request);
+
   if (isTauri()) {
     return invoke<ModelOption[]>("fetch_provider_models", { request });
   }
@@ -77,6 +82,8 @@ export async function fetchProviderModels(
 export async function testProviderConnection(
   request: ModelTestRequest,
 ): Promise<ModelTestResult> {
+  await ensureDebugLoggingConfigured(request);
+
   if (isTauri()) {
     return invoke<ModelTestResult>("test_provider_connection", { request });
   }
@@ -108,6 +115,13 @@ export async function testProviderConnection(
 
 function getDevSecretKey(provider: ApiProvider) {
   return `${DEV_SECRET_PREFIX}.${provider}`;
+}
+
+async function ensureDebugLoggingConfigured(request: ModelFetchRequest) {
+  await configureDebugLogging({
+    enabled: request.debugLoggingEnabled === true,
+    retentionDays: request.debugLogRetentionDays ?? 7,
+  });
 }
 
 async function requestDevProviderProxy<ResponseBody>(
