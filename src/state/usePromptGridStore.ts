@@ -22,6 +22,15 @@ import {
   saveColorTheme,
   type ColorTheme,
 } from "../theme";
+import { getHighestRound } from "../modules/generation/taskUtils";
+import { getErrorMessage } from "../shared/utils/error";
+import { ensureById, upsertById } from "../shared/utils/collections";
+import {
+  clampDebugLogRetentionDays,
+  getConfiguredImageModel,
+  getConfiguredProviderLabel,
+  normalizeSettings,
+} from "../modules/settings/settingsDomain";
 import type {
   AppSettings,
   AppSnapshot,
@@ -343,27 +352,6 @@ function normalizeConversation(
   };
 }
 
-function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
-  const apiProvider =
-    settings.apiProvider === "custom" || settings.apiProvider === "openai"
-      ? settings.apiProvider
-      : mockSettings.apiProvider;
-
-  return {
-    ...mockSettings,
-    ...settings,
-    apiProvider,
-    debugLogRetentionDays: clampDebugLogRetentionDays(
-      settings.debugLogRetentionDays,
-    ),
-  };
-}
-
-function clampDebugLogRetentionDays(value: unknown) {
-  const days = typeof value === "number" ? value : mockSettings.debugLogRetentionDays;
-  return Math.min(365, Math.max(1, Math.round(days || mockSettings.debugLogRetentionDays)));
-}
-
 function mergeProjectWithConversation(
   project: Project,
   conversation: Conversation,
@@ -383,40 +371,6 @@ function mergeProjectWithConversation(
 
 function laterTimestamp(left: string, right: string) {
   return left > right ? left : right;
-}
-
-function ensureById<T extends { id: string }>(items: T[], item: T) {
-  return items.some((candidate) => candidate.id === item.id)
-    ? items
-    : [item, ...items];
-}
-
-function upsertById<T extends { id: string }>(items: T[], item: T) {
-  const nextItems = items.filter((candidate) => candidate.id !== item.id);
-  return [item, ...nextItems];
-}
-
-function getHighestRound(tasks: GridCell[]) {
-  return tasks.reduce(
-    (round, task) => Math.max(round, task.explorationRound),
-    1,
-  );
-}
-
-function getConfiguredImageModel(settings: AppSettings) {
-  return settings.apiProvider === "openai"
-    ? settings.imageModel
-    : settings.customImageModel || "";
-}
-
-function getConfiguredProviderLabel(settings: AppSettings) {
-  return settings.apiProvider === "openai"
-    ? "openai"
-    : settings.customProviderName?.trim() || "custom";
-}
-
-function getErrorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function createTimestampedProject(
