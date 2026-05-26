@@ -246,7 +246,7 @@ button:disabled {
 .project-chip,
 .project-inline-action,
 .sidebar-action,
-.export-actions button,
+.grid-size-switch button,
 .icon-button,
 .cell-actions button,
 .primary-action,
@@ -1206,7 +1206,7 @@ select {
 
 .primary-action,
 .secondary-action,
-.export-actions button {
+.grid-size-switch button {
   transition:
     transform 140ms ease,
     box-shadow 140ms ease,
@@ -1216,13 +1216,13 @@ select {
 
 .primary-action:hover,
 .secondary-action:hover,
-.export-actions button:hover {
+.grid-size-switch button:hover {
   transform: translateY(-1px);
 }
 
 .primary-action:active,
 .secondary-action:active,
-.export-actions button:active {
+.grid-size-switch button:active {
   transform: translateY(0);
 }
 
@@ -1852,34 +1852,43 @@ select {
   font-weight: 840;
 }
 
-.export-actions {
+.grid-size-switch {
   display: flex;
-  gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--segmented-bg);
 }
 
-.export-actions button {
-  gap: 7px;
+.grid-size-switch button {
+  min-width: 48px;
   min-height: 36px;
-  border-color: rgba(10, 89, 247, 0.12);
-  background: rgba(255, 255, 255, 0.9);
-  padding: 0 11px;
+  border: 0;
+  background: transparent;
+  padding: 0 12px;
   color: var(--ink-soft);
+  font-size: 0.8rem;
   font-weight: 760;
 }
 
-.export-actions button:hover {
-  border-color: rgba(10, 89, 247, 0.26);
+.grid-size-switch button:hover {
+  background: rgba(255, 255, 255, 0.64);
+}
+
+.grid-size-switch button.active {
   background: #ffffff;
   color: var(--blue-deep);
-  box-shadow: 0 12px 24px rgba(24, 49, 86, 0.09);
+  box-shadow:
+    inset 0 0 0 1px rgba(10, 89, 247, 0.14),
+    0 8px 18px rgba(24, 49, 86, 0.07);
 }
 
 .image-grid {
   display: grid;
   flex: 1 1 auto;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(var(--grid-columns, 3), minmax(0, 1fr));
   grid-auto-rows: max-content;
   gap: 14px;
   overflow: auto;

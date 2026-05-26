@@ -47,6 +47,8 @@ pub struct Conversation {
     updated_at: String,
     workflow_mode: Option<String>,
     main_detail: Option<serde_json::Value>,
+    #[serde(default)]
+    configuration_locked: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -103,6 +105,8 @@ pub struct GridCell {
     project_id: String,
     #[serde(default)]
     conversation_id: Option<String>,
+    #[serde(default)]
+    grid_size: Option<i64>,
     parent_task_id: Option<String>,
     exploration_round: i64,
     index: i64,
@@ -161,6 +165,7 @@ pub struct SaveGeneratedImageRequest {
     project_title: String,
     project_directory: Option<String>,
     conversation_id: String,
+    grid_size: i64,
     exploration_round: i64,
     cell_index: i64,
     attempt: i64,
@@ -407,7 +412,7 @@ pub fn load_workspace(store: &LocalStore) -> Result<Option<AppSnapshot>, String>
             "
             SELECT id, project_id, title, original_prompt, style, grid_size,
                    aspect_ratio, quality, output_size, schema_version,
-                   created_at, updated_at, workflow_mode, main_detail
+                   created_at, updated_at, workflow_mode, main_detail, configuration_locked
             FROM conversations
             ORDER BY updated_at DESC
             ",
@@ -450,7 +455,7 @@ pub fn load_workspace(store: &LocalStore) -> Result<Option<AppSnapshot>, String>
             SELECT id, project_id, conversation_id, parent_task_id, exploration_round, cell_index,
                    prompt, direction_title, status, image_path, error_message, provider, model,
                    created_at, updated_at, attempt, visual_title, visual_palette,
-                   visual_texture, role, reference_image_path, depends_on_task_id
+                   visual_texture, role, reference_image_path, depends_on_task_id, grid_size
             FROM image_tasks
             ORDER BY conversation_id, exploration_round, cell_index
             ",
@@ -474,15 +479,27 @@ pub fn load_workspace(store: &LocalStore) -> Result<Option<AppSnapshot>, String>
             continue;
         };
         task.conversation_id = Some(conversation_id.clone());
+        let grid_size = task
+            .grid_size
+            .or_else(|| {
+                conversations
+                    .iter()
+                    .find(|conversation| conversation.id == conversation_id)
+                    .map(|conversation| conversation.grid_size)
+            })
+            .unwrap_or(project.grid_size);
+        task.grid_size = Some(grid_size);
         conversation_tasks
-            .entry(conversation_id)
+            .entry(grid_run_key(&conversation_id, grid_size))
             .or_default()
             .push(task);
     }
 
     let tasks = conversation
         .as_ref()
-        .and_then(|conversation| conversation_tasks.get(&conversation.id))
+        .and_then(|conversation| {
+            conversation_tasks.get(&grid_run_key(&conversation.id, conversation.grid_size))
+        })
         .cloned()
         .unwrap_or_default();
 
@@ -552,7 +569,7 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
     migrate_legacy_api_keys(&mut settings)?;
     refresh_api_key_status(&mut settings);
     upsert_project(&mut projects, project.clone());
-    if let Some(conversation) = conversation {
+    if let Some(conversation) = conversation.as_ref() {
         upsert_conversation(&mut conversations, conversation.clone());
     }
     let active_conversation_id = active_conversation_id.filter(|conversation_id| {
@@ -561,7 +578,14 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
             .any(|conversation| conversation.id == *conversation_id)
     });
     if let Some(active_conversation_id) = active_conversation_id.as_ref() {
-        conversation_tasks.insert(active_conversation_id.clone(), tasks);
+        let active_grid_size = conversation
+            .as_ref()
+            .map(|conversation| conversation.grid_size)
+            .unwrap_or(project.grid_size);
+        conversation_tasks.insert(
+            grid_run_key(active_conversation_id, active_grid_size),
+            tasks,
+        );
     }
     let project_files_projects = projects.clone();
     let project_files_conversations = conversations.clone();
@@ -623,9 +647,9 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
                 INSERT INTO conversations (
                     id, project_id, title, original_prompt, style, grid_size,
                     aspect_ratio, quality, output_size, schema_version,
-                    created_at, updated_at, workflow_mode, main_detail
+                    created_at, updated_at, workflow_mode, main_detail, configuration_locked
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                 ON CONFLICT(id) DO UPDATE SET
                     project_id = excluded.project_id,
                     title = excluded.title,
@@ -638,6 +662,7 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
                     schema_version = excluded.schema_version,
                     workflow_mode = excluded.workflow_mode,
                     main_detail = excluded.main_detail,
+                    configuration_locked = excluded.configuration_locked,
                     updated_at = excluded.updated_at
                 ",
                 params![
@@ -658,6 +683,7 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
                         .main_detail
                         .as_ref()
                         .map(|value| value.to_string()),
+                    conversation.configuration_locked,
                 ],
             )
             .map_err(|error| error.to_string())?;
@@ -677,17 +703,18 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
             .prepare(
                 "
                 INSERT INTO image_tasks (
-                    id, project_id, conversation_id, parent_task_id, exploration_round, cell_index,
+                    id, project_id, conversation_id, grid_size, parent_task_id, exploration_round, cell_index,
                     prompt, direction_title, status, image_path, error_message, provider, model,
                     created_at, updated_at, attempt, visual_title, visual_palette,
                     visual_texture, role, reference_image_path, depends_on_task_id
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
                 ",
             )
             .map_err(|error| error.to_string())?;
 
-        for (conversation_id, tasks) in conversation_tasks {
+        for (task_key, tasks) in conversation_tasks {
+            let conversation_id = conversation_id_from_task_key(&task_key);
             let Some(task_project_id) = conversation_project_lookup.get(&conversation_id).cloned()
             else {
                 continue;
@@ -711,6 +738,7 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
                         task.id,
                         task_project_id,
                         task_conversation_id,
+                        task.grid_size,
                         task.parent_task_id,
                         task.exploration_round,
                         task.index,
@@ -803,6 +831,8 @@ pub fn save_generated_image(
     let image_directory = project_directory
         .join("conversations")
         .join(sanitize_path_component(&request.conversation_id))
+        .join("grid-runs")
+        .join(format!("grid-{}", request.grid_size.max(1)))
         .join("images");
     fs::create_dir_all(&image_directory)
         .map_err(|error| format!("Could not create image folder: {error}"))?;
@@ -934,13 +964,43 @@ fn sync_project_files(
                 &conversation_directory.join("conversation.json"),
                 conversation,
             )?;
-            if let Some(tasks) = conversation_tasks.get(&conversation.id) {
-                write_json_file(&conversation_directory.join("tasks.json"), tasks)?;
+            for (task_key, tasks) in conversation_tasks
+                .iter()
+                .filter(|(task_key, _)| {
+                    conversation_id_from_task_key(task_key) == conversation.id
+                })
+            {
+                let grid_size = grid_size_from_task_key(task_key)
+                    .unwrap_or(conversation.grid_size);
+                let grid_run_directory = conversation_directory
+                    .join("grid-runs")
+                    .join(format!("grid-{grid_size}"));
+                fs::create_dir_all(&grid_run_directory)
+                    .map_err(|error| format!("Could not create grid run folder: {error}"))?;
+                write_json_file(&grid_run_directory.join("tasks.json"), tasks)?;
             }
         }
     }
 
     Ok(())
+}
+
+fn grid_run_key(conversation_id: &str, grid_size: i64) -> String {
+    format!("{conversation_id}::grid-{}", grid_size.max(1))
+}
+
+fn conversation_id_from_task_key(task_key: &str) -> String {
+    task_key
+        .split_once("::grid-")
+        .map(|(conversation_id, _)| conversation_id)
+        .unwrap_or(task_key)
+        .to_string()
+}
+
+fn grid_size_from_task_key(task_key: &str) -> Option<i64> {
+    task_key
+        .split_once("::grid-")
+        .and_then(|(_, grid_size)| grid_size.parse::<i64>().ok())
 }
 
 fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
@@ -1062,6 +1122,7 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             updated_at TEXT NOT NULL,
             workflow_mode TEXT,
             main_detail TEXT,
+            configuration_locked INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
 
@@ -1069,6 +1130,7 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             id TEXT PRIMARY KEY,
             project_id TEXT NOT NULL,
             conversation_id TEXT,
+            grid_size INTEGER,
             parent_task_id TEXT,
             exploration_round INTEGER NOT NULL,
             cell_index INTEGER NOT NULL,
@@ -1125,8 +1187,15 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     ensure_column(connection, "projects", "project_directory", "TEXT")?;
     ensure_column(connection, "conversations", "workflow_mode", "TEXT")?;
     ensure_column(connection, "conversations", "main_detail", "TEXT")?;
+    ensure_column(
+        connection,
+        "conversations",
+        "configuration_locked",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
     ensure_column(connection, "image_tasks", "direction_title", "TEXT")?;
     ensure_column(connection, "image_tasks", "conversation_id", "TEXT")?;
+    ensure_column(connection, "image_tasks", "grid_size", "INTEGER")?;
     ensure_column(connection, "image_tasks", "role", "TEXT")?;
     ensure_column(connection, "image_tasks", "reference_image_path", "TEXT")?;
     ensure_column(connection, "image_tasks", "depends_on_task_id", "TEXT")?;
@@ -1266,6 +1335,7 @@ fn read_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> 
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(13, Type::Text, Box::new(error))
             })?,
+        configuration_locked: row.get(14)?,
     })
 }
 
@@ -1300,6 +1370,7 @@ fn read_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<GridCell> {
         role: row.get(19)?,
         reference_image_path: row.get(20)?,
         depends_on_task_id: row.get(21)?,
+        grid_size: row.get(22)?,
     })
 }
 
@@ -1330,7 +1401,7 @@ fn migrate_legacy_conversations(connection: &Connection) -> rusqlite::Result<()>
         INSERT INTO conversations (
             id, project_id, title, original_prompt, style, grid_size,
             aspect_ratio, quality, output_size, schema_version,
-            created_at, updated_at, workflow_mode, main_detail
+            created_at, updated_at, workflow_mode, main_detail, configuration_locked
         )
         SELECT
             'conversation-' || projects.id,
@@ -1346,7 +1417,8 @@ fn migrate_legacy_conversations(connection: &Connection) -> rusqlite::Result<()>
             projects.created_at,
             projects.updated_at,
             'text-grid',
-            NULL
+            NULL,
+            0
         FROM projects
         WHERE EXISTS (
             SELECT 1 FROM image_tasks

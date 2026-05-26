@@ -3,6 +3,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { join } from "node:path";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
+import {
+  extractResponsesImageBase64,
+  extractResponsesText,
+  hasResponsesImageOutput,
+} from "./src/devProviderResponses";
 
 const host = process.env.TAURI_DEV_HOST ?? "127.0.0.1";
 const debugLogDir = join(process.cwd(), ".promptgrid-debug-logs");
@@ -107,7 +112,10 @@ async function handleAnalyzePrompts(
       model,
       input: buildPromptAnalysisInput(body, gridSize),
     },
-    body,
+    {
+      ...body,
+      streamResponses: false,
+    },
   );
   const requestUrl = buildResponsesUrl(requireField(body.baseUrl, "Base URL"));
   const { providerResponse, responseText } = await fetchProviderWithDebugLog({
@@ -133,7 +141,7 @@ async function handleAnalyzePrompts(
     );
   }
 
-  const output = extractTextOutput(parseResponsesBody(responseText));
+  const output = extractResponsesText(responseText);
   const analysis = parsePromptDirections(output, gridSize);
   sendJson(response, 200, analysis);
 }
@@ -185,7 +193,7 @@ async function handleGenerateImage(
     );
   }
 
-  const imageBase64 = extractImageBase64(parseResponsesBody(responseText));
+  const imageBase64 = extractResponsesImageBase64(responseText);
   if (!imageBase64) {
     throw new Error("Image model returned no image output");
   }
@@ -306,8 +314,7 @@ async function handleTextModelTest(
     );
   }
 
-  const responseJson = parseResponsesBody(responseText);
-  const output = extractTextOutput(responseJson);
+  const output = extractResponsesText(responseText);
   if (!output) {
     throw new Error("Model returned an empty response");
   }
@@ -363,8 +370,7 @@ async function handleImageModelTest(
     );
   }
 
-  const responseJson = parseResponsesBody(responseText);
-  if (!hasImageGenerationOutput(responseJson)) {
+  if (!hasResponsesImageOutput(responseText)) {
     throw new Error("Image model returned no image output");
   }
 
@@ -821,355 +827,6 @@ function buildResponsesUrl(baseUrl: string) {
   }
 
   return `${trimmedUrl}/v1/responses`;
-}
-
-function extractTextOutput(responseJson: unknown) {
-  if (!responseJson || typeof responseJson !== "object") {
-    return "";
-  }
-
-  const outputText = (responseJson as { output_text?: unknown }).output_text;
-  if (typeof outputText === "string" && outputText.trim()) {
-    return outputText.trim();
-  }
-
-  const output = (responseJson as { output?: unknown }).output;
-  if (Array.isArray(output)) {
-    for (const item of output) {
-      if (
-        !item ||
-        typeof item !== "object" ||
-        (item as { type?: unknown }).type !== "message"
-      ) {
-        continue;
-      }
-
-      const content = (item as { content?: unknown }).content;
-      if (!Array.isArray(content)) {
-        continue;
-      }
-
-      const text = content
-        .map((contentItem) => {
-          if (!contentItem || typeof contentItem !== "object") {
-            return "";
-          }
-
-          const value = (contentItem as { text?: unknown }).text;
-          const fallbackValue =
-            value ??
-            (contentItem as { output_text?: unknown }).output_text ??
-            (contentItem as { content?: unknown }).content;
-          return typeof fallbackValue === "string" ? fallbackValue.trim() : "";
-        })
-        .filter(Boolean)
-        .join("\n");
-
-      if (text) {
-        return text;
-      }
-    }
-  }
-
-  return extractChatCompletionOutput(responseJson);
-}
-
-function parseResponsesBody(responseText: string) {
-  try {
-    return JSON.parse(responseText) as unknown;
-  } catch {
-    const streamResponse = parseResponsesStream(responseText);
-    if (streamResponse) {
-      return streamResponse;
-    }
-
-    throw new Error("Could not parse provider response");
-  }
-}
-
-function parseResponsesStream(responseText: string) {
-  let deltaOutputText = "";
-  let finalOutputText = "";
-  const output: unknown[] = [];
-
-  for (const data of readResponseStreamEvents(responseText)) {
-    const trimmedData = data.trim();
-    if (!trimmedData || trimmedData === "[DONE]") {
-      continue;
-    }
-
-    let event: {
-      delta?: unknown;
-      item?: unknown;
-      response?: unknown;
-      result?: unknown;
-      text?: unknown;
-      type?: unknown;
-    };
-    try {
-      event = JSON.parse(trimmedData);
-    } catch {
-      continue;
-    }
-
-    if (event.type === "response.output_text.delta") {
-      deltaOutputText += typeof event.delta === "string" ? event.delta : "";
-      continue;
-    }
-
-    if (event.type === "response.output_text.done") {
-      finalOutputText =
-        typeof event.text === "string" ? event.text : finalOutputText;
-      continue;
-    }
-
-    if (event.type === "response.content_part.done") {
-      const partText = extractTextContent((event as { part?: unknown }).part);
-      if (partText) {
-        finalOutputText = partText;
-      }
-      continue;
-    }
-
-    if (event.type === "response.completed" && event.response) {
-      return mergeStreamTextIntoResponse(
-        event.response,
-        finalOutputText || deltaOutputText,
-        output,
-      );
-    }
-
-    if (event.type === "response.output_item.done" && event.item) {
-      const itemText = extractTextOutput(event.item);
-      if (itemText) {
-        finalOutputText = itemText;
-      }
-      if (hasEventItemResult(event.item)) {
-        output.push({
-          type: "image_generation_call",
-          result: event.item.result,
-        });
-      } else if (!itemText) {
-        output.push(event.item);
-      }
-      continue;
-    }
-
-    if (typeof event.type === "string" && event.type.includes("image_generation_call")) {
-      if (typeof event.result === "string") {
-        output.push({
-          type: "image_generation_call",
-          result: event.result,
-        });
-      } else if (hasEventItemResult(event.item)) {
-        output.push({
-          type: "image_generation_call",
-          result: event.item.result,
-        });
-      } else if (event.type !== "response.image_generation_call.partial_image" && event.item) {
-        output.push(event.item);
-      }
-    }
-  }
-
-  return {
-    output_text: finalOutputText || deltaOutputText,
-    output,
-  };
-}
-
-function mergeStreamTextIntoResponse(
-  response: unknown,
-  outputText: string,
-  output: unknown[],
-) {
-  if (!response || typeof response !== "object") {
-    return response;
-  }
-
-  if (extractTextOutput(response)) {
-    return response;
-  }
-
-  const nextResponse = { ...(response as Record<string, unknown>) };
-  const trimmedOutputText = outputText.trim();
-  if (trimmedOutputText) {
-    nextResponse.output_text = trimmedOutputText;
-  }
-
-  const existingOutput = Array.isArray(nextResponse.output)
-    ? nextResponse.output
-    : [];
-  if (existingOutput.length === 0 && output.length > 0) {
-    nextResponse.output = output;
-  }
-
-  return nextResponse;
-}
-
-function readResponseStreamEvents(responseText: string) {
-  const events: string[] = [];
-  let eventDataLines: string[] = [];
-
-  for (const line of responseText.split(/\r?\n/)) {
-    const trimmedLine = line.trimEnd();
-    if (!trimmedLine) {
-      if (eventDataLines.length > 0) {
-        events.push(eventDataLines.join("\n"));
-        eventDataLines = [];
-      }
-      continue;
-    }
-
-    const trimmedStart = trimmedLine.trimStart();
-    if (trimmedStart.startsWith("data:")) {
-      eventDataLines.push(trimmedStart.slice("data:".length).trimStart());
-    }
-  }
-
-  if (eventDataLines.length > 0) {
-    events.push(eventDataLines.join("\n"));
-  }
-
-  return events;
-}
-
-function hasEventItemResult(item: unknown): item is { result: string } {
-  return (
-    Boolean(item) &&
-    typeof item === "object" &&
-    typeof (item as { result?: unknown }).result === "string" &&
-    Boolean((item as { result: string }).result.trim())
-  );
-}
-
-function extractChatCompletionOutput(responseJson: unknown) {
-  if (!responseJson || typeof responseJson !== "object") {
-    return "";
-  }
-
-  const choices = (responseJson as { choices?: unknown }).choices;
-  if (!Array.isArray(choices)) {
-    return "";
-  }
-
-  for (const choice of choices) {
-    const content =
-      (choice as { message?: { content?: unknown }; text?: unknown }).message
-        ?.content ?? (choice as { text?: unknown }).text;
-    const output = extractTextContent(content);
-    if (output) {
-      return output;
-    }
-  }
-
-  return "";
-}
-
-function extractTextContent(content: unknown) {
-  if (typeof content === "string") {
-    return content.trim();
-  }
-
-  if (!Array.isArray(content)) {
-    return "";
-  }
-
-  return content
-    .map((item) => {
-      if (!item || typeof item !== "object") {
-        return "";
-      }
-
-      const value =
-        (item as { text?: unknown }).text ??
-        (item as { content?: unknown }).content;
-      return typeof value === "string" ? value.trim() : "";
-    })
-    .filter(Boolean)
-    .join("\n");
-}
-
-function hasImageGenerationOutput(responseJson: unknown) {
-  if (!responseJson || typeof responseJson !== "object") {
-    return false;
-  }
-
-  const output = (responseJson as { output?: unknown }).output;
-  if (Array.isArray(output)) {
-    const hasResponsesImage = output.some((item) => {
-      if (!item || typeof item !== "object") {
-        return false;
-      }
-
-      if ((item as { type?: unknown }).type !== "image_generation_call") {
-        return false;
-      }
-
-      const result = (item as { result?: unknown }).result;
-      return typeof result === "string" && result.trim().length > 0;
-    });
-
-    if (hasResponsesImage) {
-      return true;
-    }
-  }
-
-  const data = (responseJson as { data?: unknown }).data;
-  if (!Array.isArray(data)) {
-    return false;
-  }
-
-  return data.some((image) => {
-    if (!image || typeof image !== "object") {
-      return false;
-    }
-
-    const value =
-      (image as { url?: unknown }).url ??
-      (image as { b64_json?: unknown }).b64_json;
-    return typeof value === "string" && value.trim().length > 0;
-  });
-}
-
-function extractImageBase64(responseJson: unknown) {
-  if (!responseJson || typeof responseJson !== "object") {
-    return "";
-  }
-
-  const output = (responseJson as { output?: unknown }).output;
-  if (Array.isArray(output)) {
-    for (const item of output) {
-      if (
-        item &&
-        typeof item === "object" &&
-        (item as { type?: unknown }).type === "image_generation_call"
-      ) {
-        const result = (item as { result?: unknown }).result;
-        if (typeof result === "string" && result.trim()) {
-          return result.trim();
-        }
-      }
-    }
-  }
-
-  const data = (responseJson as { data?: unknown }).data;
-  if (Array.isArray(data)) {
-    for (const image of data) {
-      if (!image || typeof image !== "object") {
-        continue;
-      }
-
-      const result =
-        (image as { b64_json?: unknown }).b64_json ??
-        (image as { url?: unknown }).url;
-      if (typeof result === "string" && result.trim()) {
-        return result.trim();
-      }
-    }
-  }
-
-  return "";
 }
 
 async function readJsonBody(request: IncomingMessage) {

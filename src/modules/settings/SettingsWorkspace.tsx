@@ -8,7 +8,7 @@ import {
   SlidersHorizontal,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { aspectRatioOptions } from "../../data/mockProject";
+import { aspectRatioOptions, gridSizeOptions } from "../../data/mockProject";
 import { t, type Locale, type MessageKey } from "../../i18n";
 import {
   clearProviderApiKey,
@@ -63,8 +63,6 @@ const providerOptions: Array<{
   { value: "openai", labelKey: "providerOpenAI" },
   { value: "custom", labelKey: "providerCustom" },
 ];
-
-const gridSizeOptions = [9, 16, 25] as const;
 
 const storageStatusKeys = {
   idle: "saveStateIdle",
@@ -821,7 +819,7 @@ export function SettingsWorkspace() {
                     updateSetting("defaultGridSize", gridSize as GridSize)
                   }
                 >
-                  {Math.sqrt(gridSize)}x{Math.sqrt(gridSize)}
+                  {gridSize}
                 </button>
               ))}
             </div>

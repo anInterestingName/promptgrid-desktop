@@ -81,6 +81,7 @@ export function PromptPanel() {
     settings.apiProvider === "custom" ||
     configuredImageModel.toLowerCase().includes("gpt-image-2");
   const mainTask = tasks.find((task) => task.role === "main");
+  const isConfigurationLocked = Boolean(conversation.configurationLocked);
   const hasMainDetailPrompts = tasks.some(
     (task) => task.role === "main" || task.role === "detail",
   );
@@ -139,6 +140,16 @@ export function PromptPanel() {
       document.removeEventListener("pointerdown", closeFloatingFields, true);
   }, [isIdeaMenuOpen]);
 
+  useEffect(() => {
+    if (!isConfigurationLocked) {
+      return;
+    }
+
+    setIsWorkflowOpen(false);
+    setIsStyleOpen(false);
+    setIsIdeaMenuOpen(false);
+  }, [isConfigurationLocked]);
+
   return (
     <aside className="prompt-panel" aria-label={t(locale, "promptControls")}>
       <section className="panel-section">
@@ -180,7 +191,7 @@ export function PromptPanel() {
             aria-controls="workflow-select-options"
             aria-expanded={isWorkflowOpen}
             aria-haspopup="listbox"
-            disabled={isAnalyzing || isGenerating}
+            disabled={isConfigurationLocked || isAnalyzing || isGenerating}
             onClick={() => setIsWorkflowOpen((open) => !open)}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
@@ -256,6 +267,7 @@ export function PromptPanel() {
           <textarea
             aria-label={t(locale, "originalPrompt")}
             className="prompt-input idea-prompt-input"
+            disabled={isConfigurationLocked}
             value={project.originalPrompt}
             onFocus={() => setIsIdeaMenuOpen(false)}
             onChange={(event) => setOriginalPrompt(event.target.value)}
@@ -271,7 +283,11 @@ export function PromptPanel() {
                   {mainDetail.sourceImage.name ?? t(locale, "sourceImageReady")}
                 </strong>
               </div>
-              <button type="button" onClick={() => setSourceImage(undefined)}>
+              <button
+                type="button"
+                disabled={isConfigurationLocked}
+                onClick={() => setSourceImage(undefined)}
+              >
                 {t(locale, "clearSourceImage")}
               </button>
             </div>
@@ -285,11 +301,12 @@ export function PromptPanel() {
                   title={t(locale, "addIdeaAsset")}
                   aria-haspopup="menu"
                   aria-expanded={isIdeaMenuOpen}
+                  disabled={isConfigurationLocked}
                   onClick={() => setIsIdeaMenuOpen((open) => !open)}
                 >
                   <Plus size={14} aria-hidden="true" />
                 </button>
-                {isIdeaMenuOpen ? (
+                {isIdeaMenuOpen && !isConfigurationLocked ? (
                   <div className="idea-menu" role="menu">
                     <button
                       type="button"
@@ -308,6 +325,7 @@ export function PromptPanel() {
                   accept="image/*"
                   ref={sourceImageInputRef}
                   type="file"
+                  disabled={isConfigurationLocked}
                   onChange={(event) => {
                     handleSourceImageChange(event.target.files?.[0]);
                     event.currentTarget.value = "";
@@ -331,6 +349,7 @@ export function PromptPanel() {
             aria-controls="style-select-options"
             aria-expanded={isStyleOpen}
             aria-haspopup="listbox"
+            disabled={isConfigurationLocked}
             onClick={() => setIsStyleOpen((open) => !open)}
             onKeyDown={(event) => {
               if (event.key === "Escape") {
@@ -386,6 +405,7 @@ export function PromptPanel() {
           {aspectRatioOptions.map((ratio) => (
             <button
               className={project.aspectRatio === ratio ? "active" : ""}
+              disabled={isConfigurationLocked}
               key={ratio}
               type="button"
               onClick={() => setAspectRatio(ratio as AspectRatio)}
@@ -402,6 +422,7 @@ export function PromptPanel() {
           {qualityOptions.map((quality) => (
             <button
               className={project.quality === quality ? "active" : ""}
+              disabled={isConfigurationLocked}
               key={quality}
               type="button"
               onClick={() => setQuality(quality as Quality)}
@@ -419,7 +440,8 @@ export function PromptPanel() {
             const requiresFlexibleSize =
               outputSize === "2k" || outputSize === "4k";
             const isDisabled =
-              requiresFlexibleSize && !supportsFlexibleOutputSize;
+              isConfigurationLocked ||
+              (requiresFlexibleSize && !supportsFlexibleOutputSize);
 
             return (
               <button
@@ -427,7 +449,9 @@ export function PromptPanel() {
                 disabled={isDisabled}
                 key={outputSize}
                 title={
-                  isDisabled ? t(locale, "outputSizeRequiresGptImage2") : ""
+                  requiresFlexibleSize && !supportsFlexibleOutputSize
+                    ? t(locale, "outputSizeRequiresGptImage2")
+                    : ""
                 }
                 type="button"
                 onClick={() => setOutputSize(outputSize as OutputSize)}

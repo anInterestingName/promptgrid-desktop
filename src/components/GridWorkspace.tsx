@@ -1,7 +1,6 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import {
-  Download,
   Maximize2,
   RefreshCw,
   RotateCcw,
@@ -9,16 +8,22 @@ import {
   X,
 } from "lucide-react";
 import { useMemo, type CSSProperties } from "react";
+import { gridSizeOptions } from "../data/mockProject";
 import { statusLabels, t, type Locale } from "../i18n";
 import { usePromptGridStore } from "../state/usePromptGridStore";
-import type { GridCell } from "../types";
+import type { GridCell, GridSize } from "../types";
 
 export function GridWorkspace() {
   const locale = usePromptGridStore((state) => state.locale);
+  const project = usePromptGridStore((state) => state.project);
+  const conversation = usePromptGridStore((state) => state.conversation);
   const tasks = usePromptGridStore((state) => state.tasks);
   const workflowMode = usePromptGridStore((state) => state.workflowMode);
+  const isAnalyzing = usePromptGridStore((state) => state.isAnalyzing);
+  const isGenerating = usePromptGridStore((state) => state.isGenerating);
   const selectedTaskId = usePromptGridStore((state) => state.selectedTaskId);
   const previewTaskId = usePromptGridStore((state) => state.previewTaskId);
+  const setGridSize = usePromptGridStore((state) => state.setGridSize);
   const selectTask = usePromptGridStore((state) => state.selectTask);
   const previewTask = usePromptGridStore((state) => state.previewTask);
   const updateTaskPrompt = usePromptGridStore(
@@ -32,6 +37,10 @@ export function GridWorkspace() {
     () => tasks.find((task) => task.id === previewTaskId),
     [previewTaskId, tasks],
   );
+  const imageGridStyle = {
+    "--grid-columns": getGridColumns(project.gridSize),
+  } as CSSProperties;
+  const isConfigurationLocked = Boolean(conversation.configurationLocked);
 
   return (
     <section className="grid-workspace" aria-label={t(locale, "imageGridAria")}>
@@ -40,7 +49,7 @@ export function GridWorkspace() {
           <p className="eyebrow">
             {workflowMode === "main-detail"
               ? t(locale, "mainDetailEyebrow")
-              : t(locale, "gridEyebrow")}
+              : formatGridEyebrow(project.gridSize, locale)}
           </p>
           <h2>
             {workflowMode === "main-detail"
@@ -48,19 +57,22 @@ export function GridWorkspace() {
               : t(locale, "promptDirections")}
           </h2>
         </div>
-        <div className="export-actions">
-          <button type="button" title={t(locale, "exportSelectedImage")}>
-            <Download size={17} aria-hidden="true" />
-            {t(locale, "image")}
-          </button>
-          <button type="button" title={t(locale, "exportComposedGrid")}>
-            <Download size={17} aria-hidden="true" />
-            {t(locale, "grid")}
-          </button>
+        <div className="grid-size-switch" aria-label={t(locale, "gridSize")}>
+          {gridSizeOptions.map((gridSize) => (
+            <button
+              className={project.gridSize === gridSize ? "active" : ""}
+              disabled={isConfigurationLocked || isAnalyzing || isGenerating}
+              key={gridSize}
+              type="button"
+              onClick={() => setGridSize(gridSize)}
+            >
+              {gridSize}
+            </button>
+          ))}
         </div>
       </div>
 
-      <div className="image-grid">
+      <div className="image-grid" style={imageGridStyle}>
         {tasks.map((task) => (
           <GridCellCard
             isSelected={task.id === selectedTaskId}
@@ -233,6 +245,22 @@ function GridCellCard({
 
 function getTaskDirectionTitle(task: GridCell, locale: Locale) {
   return task.directionTitle?.trim() || `${t(locale, "direction")} ${task.index + 1}`;
+}
+
+function getGridColumns(gridSize: GridSize) {
+  if (gridSize >= 25) {
+    return 5;
+  }
+
+  if (gridSize >= 16) {
+    return 4;
+  }
+
+  return 3;
+}
+
+function formatGridEyebrow(gridSize: GridSize, locale: Locale) {
+  return locale === "zh" ? `${gridSize} 宫格` : `${gridSize}-Cell Grid`;
 }
 
 function MockImage({

@@ -53,8 +53,6 @@ pub struct PromptAnalyzeRequest {
     reasoning_enabled: bool,
     reasoning_effort: Option<String>,
     response_verbosity: Option<String>,
-    #[serde(default)]
-    stream_responses: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -288,7 +286,7 @@ pub fn analyze_prompt_directions(
         request.reasoning_enabled,
         request.reasoning_effort.as_deref(),
         request.response_verbosity.as_deref(),
-        request.stream_responses,
+        false,
     );
     let responses_url = build_responses_url(&request.base_url)?;
     let started_at = Instant::now();
@@ -1066,9 +1064,7 @@ fn parse_responses_api_body(response_text: &str) -> Result<Value, serde_json::Er
         return Ok(response_json);
     }
 
-    let mut delta_output_text = String::new();
-    let mut final_output_text = String::new();
-    let mut output = Vec::new();
+    let mut state = ResponsesStreamState::default();
 
     for line in response_text.lines() {
         let line = line.trim();
@@ -1081,71 +1077,113 @@ fn parse_responses_api_body(response_text: &str) -> Result<Value, serde_json::Er
         }
 
         let event = serde_json::from_str::<Value>(data)?;
-        match event.get("type").and_then(Value::as_str) {
-            Some("response.output_text.delta") => {
-                if let Some(delta) = event.get("delta").and_then(Value::as_str) {
-                    delta_output_text.push_str(delta);
-                }
-            }
-            Some("response.output_text.done") => {
-                if let Some(text) = event.get("text").and_then(Value::as_str) {
-                    final_output_text = text.to_string();
-                }
-            }
-            Some("response.content_part.done") => {
-                if let Some(text) = event
-                    .get("part")
-                    .and_then(|part| part.get("text"))
-                    .and_then(Value::as_str)
-                {
-                    final_output_text = text.to_string();
-                }
-            }
-            Some("response.output_item.done") => {
-                if let Some(item) = event.get("item") {
-                    if let Some(text) = extract_text_output(item) {
-                        final_output_text = text;
-                    } else {
-                        output.push(item.clone());
-                    }
-                }
-            }
-            Some("response.completed") => {
-                if let Some(response) = event.get("response") {
-                    let output_text = if final_output_text.trim().is_empty() {
-                        delta_output_text.as_str()
-                    } else {
-                        final_output_text.as_str()
-                    };
-                    return Ok(merge_stream_text_into_response(
-                        response.clone(),
-                        output_text,
-                        &output,
-                    ));
-                }
-            }
-            Some(event_type) if event_type.contains("image_generation_call") => {
-                if let Some(result) = event.get("result").and_then(Value::as_str) {
-                    output.push(json!({
-                        "type": "image_generation_call",
-                        "result": result
-                    }));
-                } else if let Some(item) = event.get("item") {
-                    output.push(item.clone());
-                }
-            }
-            _ => {}
+        if let Some(response) = apply_responses_stream_event(&event, &mut state) {
+            return Ok(response);
         }
     }
 
     Ok(json!({
-        "output_text": if final_output_text.trim().is_empty() {
-            delta_output_text
-        } else {
-            final_output_text
-        },
-        "output": output
+        "output_text": state.preferred_text(),
+        "output": state.output
     }))
+}
+
+#[derive(Default)]
+struct ResponsesStreamState {
+    delta_text: String,
+    done_text: String,
+    output: Vec<Value>,
+}
+
+impl ResponsesStreamState {
+    fn preferred_text(&self) -> &str {
+        if self.done_text.trim().is_empty() {
+            self.delta_text.as_str()
+        } else {
+            self.done_text.as_str()
+        }
+    }
+}
+
+fn apply_responses_stream_event(event: &Value, state: &mut ResponsesStreamState) -> Option<Value> {
+    match event.get("type").and_then(Value::as_str) {
+        Some("response.output_text.delta") => {
+            if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+                state.delta_text.push_str(delta);
+            }
+        }
+        Some("response.output_text.done") => {
+            if let Some(text) = event.get("text").and_then(Value::as_str) {
+                state.done_text = text.to_string();
+            }
+        }
+        Some("response.content_part.done") => {
+            if let Some(text) = event
+                .get("part")
+                .and_then(|part| part.get("text"))
+                .and_then(Value::as_str)
+            {
+                state.done_text = text.to_string();
+            }
+        }
+        Some("response.output_item.done") => {
+            if let Some(item) = event.get("item") {
+                capture_responses_output_item(item, state);
+            }
+        }
+        Some("response.completed") => {
+            if let Some(response) = event.get("response") {
+                return Some(merge_stream_text_into_response(
+                    response.clone(),
+                    state.preferred_text(),
+                    &state.output,
+                ));
+            }
+        }
+        Some(event_type) if event_type.contains("image_generation_call") => {
+            capture_responses_image_event(event, state);
+        }
+        _ => {}
+    }
+
+    None
+}
+
+fn capture_responses_output_item(item: &Value, state: &mut ResponsesStreamState) {
+    if let Some(text) = extract_text_output(item) {
+        state.done_text = text;
+    } else if let Some(result) = item.get("result").and_then(Value::as_str) {
+        state.output.push(json!({
+            "type": "image_generation_call",
+            "result": result
+        }));
+    } else {
+        state.output.push(item.clone());
+    }
+}
+
+fn capture_responses_image_event(event: &Value, state: &mut ResponsesStreamState) {
+    if let Some(result) = event.get("result").and_then(Value::as_str) {
+        state.output.push(json!({
+            "type": "image_generation_call",
+            "result": result
+        }));
+    } else if let Some(result) = event
+        .get("item")
+        .and_then(|item| item.get("result"))
+        .and_then(Value::as_str)
+    {
+        state.output.push(json!({
+            "type": "image_generation_call",
+            "result": result
+        }));
+    } else if event.get("type").and_then(Value::as_str)
+        != Some("response.image_generation_call.partial_image")
+    {
+        if let Some(item) = event.get("item") {
+            state.output.push(item.clone());
+        }
+    }
 }
 
 fn merge_stream_text_into_response(
@@ -1494,5 +1532,38 @@ data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}
             extract_text_output(&response_json).as_deref(),
             Some("{\"directions\":[]}")
         );
+    }
+
+    #[test]
+    fn prompt_analysis_runtime_parameters_do_not_enable_streaming() {
+        let request = PromptAnalyzeRequest {
+            provider: "custom".to_string(),
+            base_url: "https://example.test/v1".to_string(),
+            custom_headers: None,
+            text_model: "test-text".to_string(),
+            original_prompt: "A launch image".to_string(),
+            style: "Editorial".to_string(),
+            aspect_ratio: "1:1".to_string(),
+            quality: "high".to_string(),
+            output_size: "standard".to_string(),
+            grid_size: 9,
+            reasoning_enabled: false,
+            reasoning_effort: None,
+            response_verbosity: None,
+        };
+        let mut body = json!({
+            "model": request.text_model,
+            "input": build_prompt_analysis_input(&request, 9)
+        });
+
+        apply_response_runtime_parameters(
+            &mut body,
+            request.reasoning_enabled,
+            request.reasoning_effort.as_deref(),
+            request.response_verbosity.as_deref(),
+            false,
+        );
+
+        assert!(body.get("stream").is_none());
     }
 }

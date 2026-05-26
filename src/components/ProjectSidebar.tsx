@@ -82,6 +82,7 @@ export function ProjectSidebar() {
   const completedCount = usePromptGridStore(
     (state) => state.tasks.filter((task) => task.status === "completed").length,
   );
+  const taskCount = usePromptGridStore((state) => state.tasks.length);
   const [isProjectDialogOpen, setIsProjectDialogOpen] = useState(false);
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(
     () => new Set(),
@@ -321,7 +322,7 @@ export function ProjectSidebar() {
           {t(locale, "round")} {currentRound}
         </span>
         <strong>
-          {completedCount}/9 {t(locale, "complete")}
+          {completedCount}/{taskCount} {t(locale, "complete")}
         </strong>
       </section>
 

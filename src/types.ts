@@ -1,4 +1,4 @@
-export type GridSize = 9 | 16 | 25;
+export type GridSize = 6 | 9 | 16 | 25;
 
 export type AspectRatio = "1:1" | "16:9" | "9:16" | "4:3";
 
@@ -68,12 +68,14 @@ export type Conversation = {
   updatedAt: string;
   workflowMode?: WorkflowMode;
   mainDetail?: MainDetailState;
+  configurationLocked?: boolean;
 };
 
 export type ImageTask = {
   id: string;
   projectId: string;
   conversationId?: string;
+  gridSize?: GridSize;
   parentTaskId?: string;
   explorationRound: number;
   index: number;

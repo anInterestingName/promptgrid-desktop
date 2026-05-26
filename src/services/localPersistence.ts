@@ -107,6 +107,7 @@ export async function saveGeneratedImage({
       projectTitle: project.title,
       projectDirectory: project.projectDirectory ?? null,
       conversationId: conversation.id,
+      gridSize: task.gridSize ?? project.gridSize,
       explorationRound: task.explorationRound,
       cellIndex: task.index,
       attempt: task.attempt,

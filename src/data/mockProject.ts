@@ -2,6 +2,7 @@ import type {
   AppSettings,
   Conversation,
   GridCell,
+  GridSize,
   MockVisual,
   Project,
 } from "../types";
@@ -36,6 +37,7 @@ export const mockConversation: Conversation = {
   schemaVersion: mockProject.schemaVersion,
   createdAt: mockProject.createdAt,
   updatedAt: mockProject.updatedAt,
+  configurationLocked: false,
 };
 
 export const mockSettings: AppSettings = {
@@ -73,6 +75,8 @@ export const aspectRatioOptions = ["1:1", "16:9", "9:16", "4:3"] as const;
 export const qualityOptions = ["draft", "standard", "high"] as const;
 
 export const outputSizeOptions = ["standard", "large", "2k", "4k"] as const;
+
+export const gridSizeOptions = [6, 9, 16, 25] as const satisfies readonly GridSize[];
 
 export const mockVisuals: MockVisual[] = [
   {
@@ -142,10 +146,21 @@ export function createMockTasks(
     "cinematic expansion concept with motion cues",
   ];
 
-  return directions.map((direction, index) => ({
+  const targetCount = Math.max(1, project.gridSize);
+  const taskDirections = Array.from({ length: targetCount }, (_, index) => {
+    const direction = directions[index % directions.length];
+    if (index < directions.length) {
+      return direction;
+    }
+
+    return `${direction}, variation ${Math.floor(index / directions.length) + 1}`;
+  });
+
+  return taskDirections.map((direction, index) => ({
     id: `round-${explorationRound}-cell-${index + 1}-${Date.now()}`,
     projectId: project.id,
     conversationId,
+    gridSize: project.gridSize,
     parentTaskId,
     explorationRound,
     index,
@@ -156,6 +171,6 @@ export function createMockTasks(
     createdAt,
     updatedAt: createdAt,
     attempt: 1,
-    visual: mockVisuals[index],
+    visual: mockVisuals[index % mockVisuals.length],
   }));
 }

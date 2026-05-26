@@ -1,5 +1,7 @@
 import { mockSettings } from "../../data/mockProject";
-import type { AppSettings } from "../../types";
+import type { AppSettings, GridSize } from "../../types";
+
+const validGridSizes = [6, 9, 16, 25] as const satisfies readonly GridSize[];
 
 export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
   const apiProvider =
@@ -11,10 +13,17 @@ export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
     ...mockSettings,
     ...settings,
     apiProvider,
+    defaultGridSize: normalizeGridSize(settings.defaultGridSize),
     debugLogRetentionDays: clampDebugLogRetentionDays(
       settings.debugLogRetentionDays,
     ),
   };
+}
+
+function normalizeGridSize(value: unknown): GridSize {
+  return validGridSizes.includes(value as GridSize)
+    ? (value as GridSize)
+    : mockSettings.defaultGridSize;
 }
 
 export function clampDebugLogRetentionDays(value: unknown) {

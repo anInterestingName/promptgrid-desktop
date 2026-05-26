@@ -90,12 +90,23 @@ redacted by `debug_log.rs`.
 
 ## Related Fix
 
-`parse_responses_api_body` now merges accumulated stream text back into the final
-`response.completed` body when the completed body has no extractable text. This
-prevents false `Prompt analysis returned an empty response` errors for providers
-that emit an empty final `output` array.
+Prompt analysis now sends non-streaming Responses requests. It expects one
+complete text payload and then parses the JSON directions from that payload.
+This keeps structured JSON tasks away from provider-specific SSE duplication.
+
+Image generation still uses streaming because providers can emit image results
+through `image_generation_call` events. The stream parser keeps text deltas as
+fallback only, prefers final text from done events, and collects image results
+separately.
 
 The browser development path uses the Vite proxy parser in `vite.config.ts`,
 while the desktop Tauri path uses `src-tauri/src/model_config.rs`. Keep both
 parsers aligned when adding provider compatibility handling. A mismatch can make
 the in-browser app fail even when the packaged desktop command works.
+
+Current parser ownership:
+
+- Browser development proxy: `src/devProviderResponses.ts`
+- Desktop/Tauri runtime: `src-tauri/src/model_config.rs`
+- Business handlers should call text/image extraction helpers instead of reading
+  SSE event names directly.
