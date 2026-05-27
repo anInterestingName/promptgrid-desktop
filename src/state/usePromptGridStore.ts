@@ -31,6 +31,12 @@ import {
   getConfiguredProviderLabel,
   normalizeSettings,
 } from "../modules/settings/settingsDomain";
+import {
+  createWorkflowTemplateVariables,
+  getWorkflowConfig,
+  loadExternalWorkflowConfigs,
+  renderWorkflowAnalysisTemplate,
+} from "../modules/workflows/workflowConfig";
 import type {
   AppSettings,
   AppSnapshot,
@@ -38,6 +44,7 @@ import type {
   Conversation,
   GridCell,
   ImageAsset,
+  ImageReference,
   MainDetailState,
   GridSize,
   OutputSize,
@@ -230,7 +237,7 @@ function createTasksSignature(tasks: GridCell[]) {
         task.updatedAt,
         getImagePathSignature(task.imagePath),
         task.role ?? "",
-        getImagePathSignature(task.referenceImagePath),
+        getReferenceImagesSignature(task.referenceImages),
         task.dependsOnTaskId ?? "",
         task.visual.title,
         task.visual.texture,
@@ -246,6 +253,19 @@ function getImagePathSignature(imagePath?: string) {
   }
 
   return `${imagePath.length}:${imagePath.slice(0, 32)}`;
+}
+
+function getReferenceImagesSignature(referenceImages?: ImageReference[]) {
+  return (referenceImages ?? [])
+    .map((reference) =>
+      [
+        reference.id,
+        reference.role,
+        getImagePathSignature(reference.imagePath),
+        reference.name ?? "",
+      ].join("\u001f"),
+    )
+    .join("\u001e");
 }
 
 function normalizeSnapshot(snapshot: AppSnapshot, locale: Locale) {
@@ -910,6 +930,9 @@ function createActiveTaskPatch(
 function createMainDetailTasks(state: PromptGridState) {
   const createdAt = new Date().toISOString();
   const sourceImage = state.mainDetail.sourceImage;
+  const sourceReference = sourceImage
+    ? [createImageReference(sourceImage, "source" as const)]
+    : [];
   const mainTaskId =
     state.mainDetail.mainTaskId ?? `main-detail-main-${Date.now()}`;
   const detailPrompts = createDetailPrompts(
@@ -935,7 +958,7 @@ function createMainDetailTasks(state: PromptGridState) {
     attempt: 1,
     visual: mockVisuals[0],
     role: "main",
-    referenceImagePath: sourceImage?.imagePath,
+    referenceImages: sourceReference,
   };
   const detailTasks = detailPrompts.map((prompt, index) => ({
     id: `main-detail-detail-${index + 1}-${Date.now()}`,
@@ -954,7 +977,7 @@ function createMainDetailTasks(state: PromptGridState) {
     attempt: 1,
     visual: mockVisuals[(index + 1) % mockVisuals.length],
     role: "detail" as const,
-    referenceImagePath: sourceImage?.imagePath,
+    referenceImages: [],
     dependsOnTaskId: mainTask.id,
   }));
   const tasks = [mainTask, ...detailTasks];
@@ -965,6 +988,33 @@ function createMainDetailTasks(state: PromptGridState) {
   };
 
   return { tasks, mainDetail };
+}
+
+function createImageReference(
+  asset: ImageAsset,
+  role: ImageReference["role"],
+): ImageReference {
+  return {
+    id: asset.id,
+    role,
+    imagePath: asset.imagePath,
+    name: asset.name,
+  };
+}
+
+function createMainImageReference(mainTask: GridCell): ImageReference[] {
+  if (!mainTask.imagePath) {
+    return [];
+  }
+
+  return [
+    {
+      id: `main-reference-${mainTask.id}`,
+      role: "main",
+      imagePath: mainTask.imagePath,
+      name: mainTask.directionTitle ?? "Main image",
+    },
+  ];
 }
 
 function createAnalyzedMainDetailTasks(
@@ -1007,22 +1057,49 @@ function createAnalyzedMainDetailTasks(
 }
 
 function createMainDetailAnalysisProject(state: PromptGridState): Project {
-  const detailCount = Math.max(0, state.project.gridSize - 1);
-
   return {
     ...state.project,
-    gridSize: state.project.gridSize,
-    originalPrompt: [
-      state.project.originalPrompt.trim(),
-      "Analyze this as an ecommerce main image plus detail image set.",
-      `Create one prompt for the main image first, then ${detailCount} related detail-image prompts.`,
-      "Every detail-image prompt must clearly connect to the main image concept and preserve the same product identity.",
-      state.mainDetail.sourceImage
-        ? "A source/reference image is attached by the user and should be treated as the visual product reference."
-        : "No source image is attached yet, so make the prompts work from the written product idea.",
-    ]
-      .filter(Boolean)
-      .join("\n"),
+  };
+}
+
+function createWorkflowAnalysisPrompt(
+  state: PromptGridState,
+  workflowMode: WorkflowMode,
+  project: Project,
+) {
+  const workflow = getWorkflowConfig(state.settings.workflowConfigs, workflowMode);
+  if (!workflow.analysisTemplate.trim()) {
+    throw new Error(`Workflow analysis template is not configured: ${workflow.name}`);
+  }
+
+  return renderWorkflowAnalysisTemplate(
+    workflow.analysisTemplate,
+    createWorkflowTemplateVariables({
+      project,
+      hasSourceImage: Boolean(state.mainDetail.sourceImage),
+    }),
+  );
+}
+
+function mergeExternalWorkflowConfigs(
+  state: PromptGridState,
+  workflowConfigs: AppSettings["workflowConfigs"] | undefined,
+) {
+  if (!workflowConfigs) {
+    return {};
+  }
+
+  const currentSignature = JSON.stringify(state.settings.workflowConfigs);
+  const defaultSignature = JSON.stringify(mockSettings.workflowConfigs);
+  if (currentSignature !== defaultSignature) {
+    return {};
+  }
+
+  return {
+    settings: {
+      ...state.settings,
+      workflowConfigs,
+    },
   };
 }
 
@@ -1134,11 +1211,12 @@ async function runImageGeneration(
       }
 
       try {
-        const image = await generatePromptImage(
-          task.prompt,
-          state.project,
-          state.settings,
-        );
+        const image = await generatePromptImage({
+          prompt: task.prompt,
+          project: state.project,
+          settings: state.settings,
+          referenceImages: task.referenceImages,
+        });
         const generationState = get();
         const generationConversation =
           generationState.conversations.find(
@@ -1253,22 +1331,34 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
     set({ isHydrating: true, storageStatus: "loading" });
 
     try {
-      const snapshot = await loadWorkspaceSnapshot();
+      const [snapshot, externalWorkflowConfigs] = await Promise.all([
+        loadWorkspaceSnapshot(),
+        loadExternalWorkflowConfigs().catch(() => undefined),
+      ]);
       if (snapshot) {
-        set({
-          ...normalizeSnapshot(snapshot, state.locale),
+        const normalizedState = normalizeSnapshot(snapshot, state.locale);
+        set((state) => ({
+          ...normalizedState,
+          ...mergeExternalWorkflowConfigs(
+            {
+              ...state,
+              ...normalizedState,
+            },
+            externalWorkflowConfigs,
+          ),
           isHydrated: true,
           isHydrating: false,
           storageStatus: "saved",
-        });
+        }));
         return;
       }
 
-      set({
+      set((state) => ({
+        ...mergeExternalWorkflowConfigs(state, externalWorkflowConfigs),
         isHydrated: true,
         isHydrating: false,
         storageStatus: "saved",
-      });
+      }));
     } catch {
       set({
         isHydrated: true,
@@ -1797,6 +1887,7 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
         const analysis = await analyzePromptDirections(
           state.project,
           state.settings,
+          createWorkflowAnalysisPrompt(state, "text-grid", state.project),
         );
         const title = createAnalysisConversationTitle(
           analysis.conversationTitle,
@@ -2007,9 +2098,11 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
       const state = get();
 
       try {
+        const analysisProject = createMainDetailAnalysisProject(state);
         const analysis = await analyzePromptDirections(
-          createMainDetailAnalysisProject(state),
+          analysisProject,
           state.settings,
+          createWorkflowAnalysisPrompt(state, "main-detail", analysisProject),
         );
         const { tasks, mainDetail } = createAnalyzedMainDetailTasks(
           state,
@@ -2193,7 +2286,7 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
         taskIds.includes(task.id)
           ? {
               ...task,
-              referenceImagePath: mainTask.imagePath,
+              referenceImages: createMainImageReference(mainTask),
               dependsOnTaskId: mainTask.id,
               status: "pending" as const,
               errorMessage: undefined,

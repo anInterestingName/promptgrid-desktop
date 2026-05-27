@@ -7,6 +7,7 @@ use reqwest::header::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::fs;
 use std::io::{BufRead, BufReader};
 use std::time::{Duration, Instant};
 
@@ -44,12 +45,7 @@ pub struct PromptAnalyzeRequest {
     base_url: String,
     custom_headers: Option<String>,
     text_model: String,
-    original_prompt: String,
-    style: String,
-    aspect_ratio: String,
-    quality: String,
-    #[serde(default = "default_output_size")]
-    output_size: String,
+    prompt: Option<String>,
     grid_size: usize,
     #[serde(default)]
     reasoning_enabled: bool,
@@ -93,6 +89,17 @@ pub struct ImageGenerateRequest {
     response_verbosity: Option<String>,
     #[serde(default)]
     stream_responses: bool,
+    #[serde(default)]
+    reference_images: Vec<ImageReferenceInput>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageReferenceInput {
+    id: String,
+    role: String,
+    image_path: String,
+    name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,6 +139,7 @@ struct UnifiedProviderRequest {
     base_url: String,
     model: Option<String>,
     prompt: Option<String>,
+    reference_images: Vec<ImageReferenceInput>,
     reasoning_enabled: bool,
     reasoning_effort: Option<String>,
     response_verbosity: Option<String>,
@@ -334,7 +342,8 @@ pub fn analyze_prompt_directions(
         provider: request.provider.clone(),
         base_url: request.base_url.clone(),
         model: Some(model.to_string()),
-        prompt: Some(build_prompt_analysis_input(&request, grid_size)),
+        prompt: Some(prompt_analysis_input(&request)?),
+        reference_images: Vec::new(),
         reasoning_enabled: request.reasoning_enabled,
         reasoning_effort: request.reasoning_effort.clone(),
         response_verbosity: request.response_verbosity.clone(),
@@ -441,6 +450,7 @@ pub fn generate_prompt_image(request: ImageGenerateRequest) -> Result<GeneratedI
         base_url: request.base_url.clone(),
         model: Some(model.to_string()),
         prompt: Some(prompt.to_string()),
+        reference_images: request.reference_images.clone(),
         reasoning_enabled: request.reasoning_enabled,
         reasoning_effort: request.reasoning_effort.clone(),
         response_verbosity: request.response_verbosity.clone(),
@@ -610,6 +620,7 @@ fn test_text_model(
         base_url: base_url.to_string(),
         model: Some(model.to_string()),
         prompt: None,
+        reference_images: Vec::new(),
         reasoning_enabled: request.reasoning_enabled,
         reasoning_effort: request.reasoning_effort.clone(),
         response_verbosity: request.response_verbosity.clone(),
@@ -694,6 +705,7 @@ fn test_image_model(
         base_url: base_url.to_string(),
         model: Some(model.to_string()),
         prompt: None,
+        reference_images: Vec::new(),
         reasoning_enabled: request.reasoning_enabled,
         reasoning_effort: request.reasoning_effort.clone(),
         response_verbosity: request.response_verbosity.clone(),
@@ -812,7 +824,7 @@ fn build_provider_http_request(
             };
             let mut body = json!({
                 "model": model,
-                "input": build_responses_user_input(&prompt),
+                "input": build_responses_user_input(&prompt, &[])?,
             });
             apply_response_runtime_parameters(
                 &mut body,
@@ -833,8 +845,9 @@ fn build_provider_http_request(
             let mut body = json!({
                 "model": model,
                 "input": build_responses_user_input(
-                    "Generate a simple image of a small blue square on a white background."
-                ),
+                    "Generate a simple image of a small blue square on a white background.",
+                    &[],
+                )?,
                 "tools": [
                     {
                         "type": "image_generation"
@@ -866,7 +879,10 @@ fn build_provider_http_request(
                 .ok_or_else(|| "Image request options are required".to_string())?;
             let mut body = json!({
                 "model": model,
-                "input": build_responses_user_input(require_prompt(request, "Image prompt")?),
+                "input": build_responses_user_input(
+                    require_prompt(request, "Image prompt")?,
+                    &request.reference_images,
+                )?,
                 "tools": [
                     build_image_generation_tool(
                         image.aspect_ratio.as_deref().unwrap_or("1:1"),
@@ -902,19 +918,29 @@ fn build_provider_http_request(
     }
 }
 
-fn build_responses_user_input(prompt: &str) -> Value {
-    json!([
+fn build_responses_user_input(
+    prompt: &str,
+    reference_images: &[ImageReferenceInput],
+) -> Result<Value, String> {
+    let mut content = vec![json!({
+        "type": "input_text",
+        "text": prompt
+    })];
+
+    for reference in reference_images {
+        content.push(json!({
+            "type": "input_image",
+            "image_url": reference_image_data_url(reference)?
+        }));
+    }
+
+    Ok(json!([
         {
             "type": "message",
             "role": "user",
-            "content": [
-                {
-                    "type": "input_text",
-                    "text": prompt
-                }
-            ]
+            "content": content
         }
-    ])
+    ]))
 }
 
 fn parse_provider_response(
@@ -958,6 +984,79 @@ fn require_prompt<'a>(request: &'a UnifiedProviderRequest, label: &str) -> Resul
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| format!("{label} is required"))
+}
+
+fn reference_image_data_url(reference: &ImageReferenceInput) -> Result<String, String> {
+    let image_path = reference.image_path.trim();
+    if image_path.is_empty() {
+        return Err(format!(
+            "Reference image `{}` ({}) is missing a path",
+            reference.id, reference.role
+        ));
+    }
+
+    if image_path.starts_with("data:image/") || image_path.starts_with("http://") || image_path.starts_with("https://") {
+        return Ok(image_path.to_string());
+    }
+
+    let bytes = fs::read(image_path).map_err(|error| {
+        format!(
+            "Could not read reference image `{}`{}: {error}",
+            reference.id,
+            reference
+                .name
+                .as_deref()
+                .map(|name| format!(" ({name}, {})", reference.role))
+                .or_else(|| Some(format!(" ({})", reference.role)))
+                .unwrap_or_default()
+        )
+    })?;
+    let mime_type = mime_type_from_path(image_path);
+
+    Ok(format!(
+        "data:{mime_type};base64,{}",
+        encode_base64(&bytes)
+    ))
+}
+
+fn mime_type_from_path(image_path: &str) -> &'static str {
+    let lowercase_path = image_path.to_ascii_lowercase();
+    if lowercase_path.ends_with(".jpg") || lowercase_path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lowercase_path.ends_with(".webp") {
+        "image/webp"
+    } else {
+        "image/png"
+    }
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = *chunk.get(1).unwrap_or(&0);
+        let third = *chunk.get(2).unwrap_or(&0);
+
+        output.push(ALPHABET[(first >> 2) as usize] as char);
+        output.push(ALPHABET[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
+
+        if chunk.len() > 1 {
+            output.push(ALPHABET[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char);
+        } else {
+            output.push('=');
+        }
+
+        if chunk.len() > 2 {
+            output.push(ALPHABET[(third & 0b0011_1111) as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+
+    output
 }
 
 fn apply_response_runtime_parameters(
@@ -1156,6 +1255,7 @@ fn is_event_stream_content_type(value: &str) -> bool {
     value.to_ascii_lowercase().contains("text/event-stream")
 }
 
+#[derive(Debug)]
 struct ImageStreamFailure {
     message: String,
     response_text: String,
@@ -1169,12 +1269,19 @@ fn read_image_generation_stream(response: Response) -> Result<String, ImageStrea
 
     loop {
         line.clear();
-        let byte_count = reader
-            .read_line(&mut line)
-            .map_err(|error| ImageStreamFailure {
-                message: format!("Could not read image generation stream: {error}"),
-                response_text: String::new(),
-            })?;
+        let byte_count = match reader.read_line(&mut line) {
+            Ok(byte_count) => byte_count,
+            Err(error) => {
+                if let Some(result) = fallback_image_base64 {
+                    return Ok(result);
+                }
+
+                return Err(ImageStreamFailure {
+                    message: format!("Could not read image generation stream: {error}"),
+                    response_text: String::new(),
+                });
+            }
+        };
 
         if byte_count == 0 {
             break;
@@ -1259,7 +1366,15 @@ fn process_image_stream_event(
         .and_then(Value::as_str)
         .unwrap_or_default();
     if event_type == "response.image_generation_call.partial_image" {
-        return Ok(ImageStreamEvent::Continue);
+        return Ok(extract_partial_image_result_from_event(&event)
+            .map(ImageStreamEvent::FallbackImage)
+            .unwrap_or(ImageStreamEvent::Continue));
+    }
+
+    if event_type == "image_generation.partial_image" {
+        return Ok(extract_partial_image_result_from_event(&event)
+            .map(ImageStreamEvent::FallbackImage)
+            .unwrap_or(ImageStreamEvent::Continue));
     }
 
     if event_type == "response.image_generation_call.completed" {
@@ -1319,6 +1434,16 @@ fn extract_image_result_from_event(event: &Value) -> Option<String> {
                 .and_then(|item| item.get("result"))
                 .and_then(Value::as_str)
         })
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn extract_partial_image_result_from_event(event: &Value) -> Option<String> {
+    event
+        .get("partial_image_b64")
+        .or_else(|| event.get("b64_json"))
+        .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
@@ -1933,24 +2058,14 @@ fn extract_response_error(response_json: &Value) -> Option<String> {
     Some(message.to_string())
 }
 
-fn build_prompt_analysis_input(request: &PromptAnalyzeRequest, grid_size: usize) -> String {
-    [
-        "You create image-generation prompt directions for a visual exploration grid.".to_string(),
-        format!("Return exactly {grid_size} distinct directions and one short chat title as strict JSON with this shape:"),
-        "{\"conversationTitle\":\"short title for this exploration\",\"directions\":[{\"title\":\"concise direction title\",\"prompt\":\"full image generation prompt\"}]}".to_string(),
-        "Do not include markdown, commentary, numbering, or extra keys.".to_string(),
-        "The conversationTitle should summarize the original idea in 3 to 8 words and use the same language as the original idea.".to_string(),
-        "Each title should be 2 to 6 words, concrete, and in the same language as the original idea."
-            .to_string(),
-        format!("Original idea: {}", request.original_prompt.trim()),
-        format!("Visual style: {}", request.style.trim()),
-        format!("Aspect ratio: {}", request.aspect_ratio.trim()),
-        format!("Render quality target: {}", request.quality.trim()),
-        format!("Output size target: {}", request.output_size.trim()),
-        "Each prompt should be specific, production-ready, and visually different from the others."
-            .to_string(),
-    ]
-    .join("\n")
+fn prompt_analysis_input(request: &PromptAnalyzeRequest) -> Result<String, String> {
+    request
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "Workflow analysis prompt is required".to_string())
 }
 
 fn parse_prompt_directions(output: &str, grid_size: usize) -> Result<PromptAnalysisResult, String> {
@@ -2230,6 +2345,7 @@ data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}
             base_url: "https://api.openai.com/v1".to_string(),
             model: Some("test-text".to_string()),
             prompt: None,
+            reference_images: Vec::new(),
             reasoning_enabled: false,
             reasoning_effort: None,
             response_verbosity: None,
@@ -2319,6 +2435,7 @@ data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}
             base_url: "https://api.openai.com/v1".to_string(),
             model: Some("test-text".to_string()),
             prompt: None,
+            reference_images: Vec::new(),
             reasoning_enabled: false,
             reasoning_effort: None,
             response_verbosity: None,
@@ -2344,6 +2461,7 @@ data: {"type":"response.failed","response":{"status":"failed","error":{"message"
             base_url: "https://api.openai.com/v1".to_string(),
             model: Some("test-text".to_string()),
             prompt: None,
+            reference_images: Vec::new(),
             reasoning_enabled: false,
             reasoning_effort: None,
             response_verbosity: None,
@@ -2361,17 +2479,26 @@ data: {"type":"response.failed","response":{"status":"failed","error":{"message"
     }
 
     #[test]
+    fn captures_partial_image_stream_event_as_fallback() {
+        let event = vec![
+            r#"{"type":"response.image_generation_call.partial_image","partial_image_b64":"abc123"}"#
+                .to_string(),
+        ];
+
+        match process_image_stream_event(&event).unwrap() {
+            ImageStreamEvent::FallbackImage(image) => assert_eq!(image, "abc123"),
+            _ => panic!("expected partial image to be captured as fallback"),
+        }
+    }
+
+    #[test]
     fn prompt_analysis_runtime_parameters_do_not_enable_streaming() {
         let request = PromptAnalyzeRequest {
             provider: "openai-compatible".to_string(),
             base_url: "https://example.test/v1".to_string(),
             custom_headers: None,
             text_model: "test-text".to_string(),
-            original_prompt: "A launch image".to_string(),
-            style: "Editorial".to_string(),
-            aspect_ratio: "1:1".to_string(),
-            quality: "high".to_string(),
-            output_size: "standard".to_string(),
+            prompt: Some("Configured workflow prompt".to_string()),
             grid_size: 9,
             reasoning_enabled: false,
             reasoning_effort: None,
@@ -2379,7 +2506,7 @@ data: {"type":"response.failed","response":{"status":"failed","error":{"message"
         };
         let mut body = json!({
             "model": request.text_model,
-            "input": build_prompt_analysis_input(&request, 9)
+            "input": prompt_analysis_input(&request).expect("configured prompt")
         });
 
         apply_response_runtime_parameters(

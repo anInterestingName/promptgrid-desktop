@@ -58,6 +58,10 @@ pub struct AppSettings {
     providers: ProviderConfigs,
     #[serde(default = "default_active_model_selection")]
     active_model_selection: ActiveModelSelection,
+    #[serde(default = "default_workflow_configs")]
+    workflow_configs: serde_json::Value,
+    #[serde(default = "default_show_workflow_config_editor")]
+    show_workflow_config_editor: bool,
     #[serde(default)]
     debug_logging_enabled: bool,
     #[serde(default = "default_debug_log_retention_days")]
@@ -231,8 +235,18 @@ pub struct GridCell {
     attempt: i64,
     visual: MockVisual,
     role: Option<String>,
-    reference_image_path: Option<String>,
+    #[serde(default)]
+    reference_images: Vec<ImageReference>,
     depends_on_task_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageReference {
+    id: String,
+    role: String,
+    image_path: String,
+    name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -278,6 +292,17 @@ pub struct SaveGeneratedImageRequest {
     exploration_round: i64,
     cell_index: i64,
     attempt: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveReferenceImageRequest {
+    image_data_url: String,
+    project_id: String,
+    project_title: String,
+    project_directory: Option<String>,
+    conversation_id: String,
+    name: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -564,7 +589,7 @@ pub fn load_workspace(store: &LocalStore) -> Result<Option<AppSnapshot>, String>
             SELECT id, project_id, conversation_id, parent_task_id, exploration_round, cell_index,
                    prompt, direction_title, status, image_path, error_message, provider, model,
                    created_at, updated_at, attempt, visual_title, visual_palette,
-                   visual_texture, role, reference_image_path, depends_on_task_id, grid_size
+                   visual_texture, role, reference_images, depends_on_task_id, grid_size
             FROM image_tasks
             ORDER BY conversation_id, exploration_round, cell_index
             ",
@@ -815,7 +840,7 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
                     id, project_id, conversation_id, grid_size, parent_task_id, exploration_round, cell_index,
                     prompt, direction_title, status, image_path, error_message, provider, model,
                     created_at, updated_at, attempt, visual_title, visual_palette,
-                    visual_texture, role, reference_image_path, depends_on_task_id
+                    visual_texture, role, reference_images, depends_on_task_id
                 )
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
                 ",
@@ -831,6 +856,8 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
 
             for mut task in tasks {
                 let palette = serde_json::to_string(&task.visual.palette)
+                    .map_err(|error| error.to_string())?;
+                let reference_images = serde_json::to_string(&task.reference_images)
                     .map_err(|error| error.to_string())?;
                 let task_conversation_id = task
                     .conversation_id
@@ -865,7 +892,7 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
                         palette,
                         task.visual.texture,
                         task.role,
-                        task.reference_image_path,
+                        reference_images,
                         task.depends_on_task_id,
                     ])
                     .map_err(|error| error.to_string())?;
@@ -955,6 +982,47 @@ pub fn save_generated_image(
     ));
     fs::write(&image_path, bytes)
         .map_err(|error| format!("Could not save generated image: {error}"))?;
+
+    Ok(SavedImage {
+        image_path: path_to_display_string(&image_path),
+    })
+}
+
+pub fn save_reference_image(
+    store: &LocalStore,
+    request: SaveReferenceImageRequest,
+) -> Result<SavedImage, String> {
+    let data_dir = store
+        .data_dir
+        .lock()
+        .map_err(|_| "Storage path lock is poisoned".to_string())?
+        .clone();
+    let project_directory = resolve_project_directory(
+        &data_dir,
+        &request.project_id,
+        &request.project_title,
+        request.project_directory.as_deref(),
+    )?;
+    let reference_directory = project_directory
+        .join("conversations")
+        .join(sanitize_path_component(&request.conversation_id))
+        .join("references");
+    fs::create_dir_all(&reference_directory)
+        .map_err(|error| format!("Could not create reference image folder: {error}"))?;
+
+    let (extension, bytes) = decode_image_data_url(&request.image_data_url)?;
+    let base_name = request
+        .name
+        .as_deref()
+        .map(sanitize_path_component)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "source".to_string());
+    let image_path = reference_directory.join(format!(
+        "{base_name}-{timestamp}.{extension}",
+        timestamp = chrono_like_timestamp()
+    ));
+    fs::write(&image_path, bytes)
+        .map_err(|error| format!("Could not save reference image: {error}"))?;
 
     Ok(SavedImage {
         image_path: path_to_display_string(&image_path),
@@ -1257,7 +1325,7 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             visual_palette TEXT NOT NULL,
             visual_texture TEXT NOT NULL,
             role TEXT,
-            reference_image_path TEXT,
+            reference_images TEXT,
             depends_on_task_id TEXT,
             FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
         );
@@ -1306,7 +1374,8 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
     ensure_column(connection, "image_tasks", "conversation_id", "TEXT")?;
     ensure_column(connection, "image_tasks", "grid_size", "INTEGER")?;
     ensure_column(connection, "image_tasks", "role", "TEXT")?;
-    ensure_column(connection, "image_tasks", "reference_image_path", "TEXT")?;
+    ensure_column(connection, "image_tasks", "reference_images", "TEXT")?;
+    drop_column_if_exists(connection, "image_tasks", "reference_image_path")?;
     ensure_column(connection, "image_tasks", "depends_on_task_id", "TEXT")?;
     ensure_column(connection, "app_state", "selected_conversation_id", "TEXT")?;
     connection.execute(
@@ -1477,10 +1546,27 @@ fn read_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<GridCell> {
             texture: row.get(18)?,
         },
         role: row.get(19)?,
-        reference_image_path: row.get(20)?,
+        reference_images: read_reference_images(row.get(20)?),
         depends_on_task_id: row.get(21)?,
         grid_size: row.get(22)?,
     })
+}
+
+fn read_reference_images(value: Option<String>) -> Vec<ImageReference> {
+    value
+        .as_deref()
+        .filter(|raw| !raw.trim().is_empty())
+        .and_then(|raw| serde_json::from_str::<Vec<ImageReference>>(raw).ok())
+        .unwrap_or_default()
+}
+
+fn chrono_like_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().to_string())
+        .unwrap_or_else(|_| "0".to_string())
 }
 
 fn ensure_column(
@@ -1501,6 +1587,23 @@ fn ensure_column(
         &format!("ALTER TABLE {table} ADD COLUMN {column} {column_type}"),
         [],
     )?;
+    Ok(())
+}
+
+fn drop_column_if_exists(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+) -> rusqlite::Result<()> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for existing_column in columns {
+        if existing_column? == column {
+            connection.execute(&format!("ALTER TABLE {table} DROP COLUMN {column}"), [])?;
+            return Ok(());
+        }
+    }
+
     Ok(())
 }
 
@@ -1739,6 +1842,8 @@ fn default_settings() -> AppSettings {
     AppSettings {
         providers: default_provider_configs(),
         active_model_selection: default_active_model_selection(),
+        workflow_configs: default_workflow_configs(),
+        show_workflow_config_editor: default_show_workflow_config_editor(),
         debug_logging_enabled: false,
         debug_log_retention_days: default_debug_log_retention_days(),
         max_concurrency: 3,
@@ -1766,6 +1871,14 @@ fn default_settings() -> AppSettings {
         text_runtime: None,
         image_runtime: None,
     }
+}
+
+fn default_workflow_configs() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+fn default_show_workflow_config_editor() -> bool {
+    true
 }
 
 fn default_provider_configs() -> ProviderConfigs {

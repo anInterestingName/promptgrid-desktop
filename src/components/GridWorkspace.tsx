@@ -30,6 +30,7 @@ import {
 } from "../services/localPersistence";
 import { getErrorMessage } from "../shared/utils/error";
 import { usePromptGridStore } from "../state/usePromptGridStore";
+import { getWorkflowConfig } from "../modules/workflows/workflowConfig";
 import type { GridCell, GridSize } from "../types";
 
 const cellContextMenuWidth = 196;
@@ -41,6 +42,7 @@ export function GridWorkspace() {
   const project = usePromptGridStore((state) => state.project);
   const conversation = usePromptGridStore((state) => state.conversation);
   const tasks = usePromptGridStore((state) => state.tasks);
+  const settings = usePromptGridStore((state) => state.settings);
   const workflowMode = usePromptGridStore((state) => state.workflowMode);
   const isAnalyzing = usePromptGridStore((state) => state.isAnalyzing);
   const isGenerating = usePromptGridStore((state) => state.isGenerating);
@@ -78,6 +80,10 @@ export function GridWorkspace() {
     "--grid-columns": getGridColumns(project.gridSize),
   } as CSSProperties;
   const isConfigurationLocked = Boolean(conversation.configurationLocked);
+  const activeWorkflowConfig = getWorkflowConfig(
+    settings.workflowConfigs,
+    workflowMode,
+  );
 
   useEffect(() => {
     if (!imageActionMessage) {
@@ -219,12 +225,12 @@ export function GridWorkspace() {
         <div>
           <p className="eyebrow">
             {workflowMode === "main-detail"
-              ? t(locale, "mainDetailEyebrow")
+              ? activeWorkflowConfig.name
               : formatGridEyebrow(project.gridSize, locale)}
           </p>
           <h2>
             {workflowMode === "main-detail"
-              ? t(locale, "mainDetailDirections")
+              ? activeWorkflowConfig.description
               : t(locale, "promptDirections")}
           </h2>
         </div>

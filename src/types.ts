@@ -59,12 +59,31 @@ export type TaskStatus =
 
 export type WorkflowMode = "text-grid" | "main-detail";
 
+export type WorkflowExecutionStrategy = "matrix_exploration" | "main_detail_set";
+
+export type WorkflowConfig = {
+  id: WorkflowMode;
+  name: string;
+  description: string;
+  executionStrategy: WorkflowExecutionStrategy;
+  enabled: boolean;
+  sortOrder: number;
+  analysisTemplate: string;
+};
+
 export type ImageAsset = {
   id: string;
   kind: "source" | "main";
   imagePath: string;
   name?: string;
   createdAt: string;
+};
+
+export type ImageReference = {
+  id: string;
+  role: "source" | "main" | "detail" | "custom";
+  imagePath: string;
+  name?: string;
 };
 
 export type MainDetailState = {
@@ -127,13 +146,15 @@ export type ImageTask = {
   createdAt: string;
   updatedAt: string;
   role?: GridCellRole;
-  referenceImagePath?: string;
+  referenceImages?: ImageReference[];
   dependsOnTaskId?: string;
 };
 
 export type AppSettings = {
   providers: Record<ProviderId, ProviderConfig>;
   activeModelSelection: ActiveModelSelection;
+  workflowConfigs: Record<WorkflowMode, WorkflowConfig>;
+  showWorkflowConfigEditor: boolean;
   debugLoggingEnabled: boolean;
   debugLogRetentionDays: number;
   maxConcurrency: number;

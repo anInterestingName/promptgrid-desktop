@@ -1336,6 +1336,13 @@ select {
   overflow-wrap: anywhere;
 }
 
+.workflow-description {
+  margin: -6px 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
 .settings-actions-row {
   display: flex;
   gap: 10px;
@@ -1744,6 +1751,42 @@ select {
   resize: vertical;
   padding: 10px;
   line-height: 1.45;
+}
+
+.workflow-template-editor {
+  display: grid;
+  gap: 16px;
+}
+
+.workflow-template-textarea,
+.workflow-template-preview {
+  min-height: 260px;
+  font-family:
+    "SFMono-Regular",
+    Consolas,
+    "Liberation Mono",
+    monospace;
+  font-size: 0.78rem;
+}
+
+.workflow-template-preview {
+  min-height: 180px;
+  background: rgba(248, 251, 255, 0.9);
+}
+
+.workflow-variable-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.workflow-variable-list code {
+  border: 1px solid rgba(10, 89, 247, 0.12);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.8);
+  color: var(--blue-deep);
+  padding: 5px 7px;
+  font-size: 0.75rem;
 }
 
 .input-with-icon,

@@ -2,6 +2,7 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 import { configureDebugLogging } from "./debugLogging";
 import type {
   AppSettings,
+  ImageReference,
   ModelCapability,
   Project,
   ProviderId,
@@ -26,12 +27,8 @@ export type PromptAnalysisResult = {
 };
 
 export type AnalyzePromptRequest = TextProviderRuntime & {
-  aspectRatio: string;
   gridSize: number;
-  originalPrompt: string;
-  outputSize: string;
-  quality: string;
-  style: string;
+  prompt: string;
   textModel: string;
 };
 
@@ -45,6 +42,7 @@ export type GenerateImageRequest = ImageProviderRuntime & {
   outputSize: string;
   prompt: string;
   quality: string;
+  referenceImages?: ImageReference[];
 };
 
 export type GeneratedImage = {
@@ -78,16 +76,13 @@ type ImageProviderRuntime = ProviderRuntime & {
 export async function analyzePromptDirections(
   project: Project,
   settings: AppSettings,
+  prompt: string,
 ): Promise<PromptAnalysisResult> {
   const textProvider = getConfiguredTextProvider(settings);
   const request = {
     ...buildTextProviderRuntime(settings),
-    aspectRatio: project.aspectRatio,
     gridSize: project.gridSize,
-    originalPrompt: project.originalPrompt,
-    outputSize: project.outputSize,
-    quality: project.quality,
-    style: project.style,
+    prompt,
     textModel: textProvider.model,
   } satisfies AnalyzePromptRequest;
 
@@ -100,11 +95,17 @@ export async function analyzePromptDirections(
   return requestDevAiProxy<PromptAnalysisResult>("analyze-prompts", request);
 }
 
-export async function generatePromptImage(
-  prompt: string,
-  project: Project,
-  settings: AppSettings,
-): Promise<GeneratedImage> {
+export async function generatePromptImage({
+  prompt,
+  project,
+  settings,
+  referenceImages = [],
+}: {
+  prompt: string;
+  project: Project;
+  settings: AppSettings;
+  referenceImages?: ImageReference[];
+}): Promise<GeneratedImage> {
   const imageProvider = getConfiguredImageProvider(settings);
   const request = {
     ...buildImageProviderRuntime(settings),
@@ -117,6 +118,7 @@ export async function generatePromptImage(
     outputSize: getSupportedOutputSize(project.outputSize, settings),
     prompt,
     quality: project.quality,
+    referenceImages,
   } satisfies GenerateImageRequest;
 
   await ensureDebugLoggingConfigured(request);

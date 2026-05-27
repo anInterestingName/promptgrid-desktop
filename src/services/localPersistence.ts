@@ -3,6 +3,7 @@ import type {
   AppSnapshot,
   Conversation,
   GridCell,
+  ImageAsset,
   Project,
   ProviderId,
 } from "../types";
@@ -137,6 +138,49 @@ export async function saveGeneratedImage({
   });
 
   return result.imagePath;
+}
+
+export async function saveReferenceImage({
+  imageDataUrl,
+  project,
+  conversation,
+  name,
+}: {
+  imageDataUrl: string;
+  project: Project;
+  conversation: Conversation;
+  name?: string;
+}): Promise<ImageAsset> {
+  const createdAt = new Date().toISOString();
+
+  if (!isTauri()) {
+    return {
+      id: `source-${Date.now()}`,
+      kind: "source",
+      imagePath: imageDataUrl,
+      name,
+      createdAt,
+    };
+  }
+
+  const result = await invoke<{ imagePath: string }>("save_reference_image", {
+    request: {
+      imageDataUrl,
+      projectId: project.id,
+      projectTitle: project.title,
+      projectDirectory: project.projectDirectory ?? null,
+      conversationId: conversation.id,
+      name: name ?? null,
+    },
+  });
+
+  return {
+    id: `source-${Date.now()}`,
+    kind: "source",
+    imagePath: result.imagePath,
+    name,
+    createdAt,
+  };
 }
 
 function sanitizeSnapshot(snapshot: AppSnapshot): AppSnapshot {

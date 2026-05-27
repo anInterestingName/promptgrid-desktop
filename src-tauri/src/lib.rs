@@ -7,7 +7,10 @@ use model_config::{
     ModelTestResult, PromptAnalysisResult, PromptAnalyzeRequest,
 };
 use std::path::{Path, PathBuf};
-use storage::{AppSnapshot, LocalStore, SaveGeneratedImageRequest, SavedImage, StorageInfo};
+use storage::{
+    AppSnapshot, LocalStore, SaveGeneratedImageRequest, SaveReferenceImageRequest, SavedImage,
+    StorageInfo,
+};
 use tauri::{Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
@@ -176,6 +179,15 @@ async fn save_generated_image(
     run_blocking(move || storage::save_generated_image(&store, request)).await
 }
 
+#[tauri::command]
+async fn save_reference_image(
+    store: State<'_, LocalStore>,
+    request: SaveReferenceImageRequest,
+) -> Result<SavedImage, String> {
+    let store = store.inner().clone();
+    run_blocking(move || storage::save_reference_image(&store, request)).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -204,7 +216,8 @@ pub fn run() {
             test_provider_connection,
             analyze_prompt_directions,
             generate_prompt_image,
-            save_generated_image
+            save_generated_image,
+            save_reference_image
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

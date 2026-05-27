@@ -4,9 +4,15 @@ import {
   qualityOptions,
   styleOptions,
 } from "../data/mockProject";
+import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { outputSizeLabels, qualityLabels, styleLabels, t } from "../i18n";
 import { getConfiguredImageProvider } from "../modules/settings/settingsDomain";
+import {
+  getEnabledWorkflowConfigs,
+  getWorkflowConfig,
+} from "../modules/workflows/workflowConfig";
 import { visibleProviderAdapterList } from "../modules/settings/providerAdapters";
+import { saveReferenceImage } from "../services/localPersistence";
 import { usePromptGridStore } from "../state/usePromptGridStore";
 import type {
   AspectRatio,
@@ -28,14 +34,6 @@ import {
   Wand2,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-
-const workflowOptions: Array<{
-  value: WorkflowMode;
-  labelKey: "textGridWorkflow" | "mainDetailWorkflow";
-}> = [
-  { value: "text-grid", labelKey: "textGridWorkflow" },
-  { value: "main-detail", labelKey: "mainDetailWorkflow" },
-];
 
 export function PromptPanel() {
   const locale = usePromptGridStore((state) => state.locale);
@@ -78,6 +76,11 @@ export function PromptPanel() {
   const styleFieldRef = useRef<HTMLDivElement>(null);
   const ideaFieldRef = useRef<HTMLDivElement>(null);
   const sourceImageInputRef = useRef<HTMLInputElement>(null);
+  const workflowOptions = getEnabledWorkflowConfigs(settings.workflowConfigs);
+  const activeWorkflowConfig = getWorkflowConfig(
+    settings.workflowConfigs,
+    workflowMode,
+  );
   const selectedStyleLabel = styleLabels[locale][project.style];
   const configuredImageProvider = getConfiguredImageProvider(settings);
   const configuredImageModel = configuredImageProvider.model;
@@ -150,14 +153,16 @@ export function PromptPanel() {
         return;
       }
 
-      const createdAt = new Date().toISOString();
-      setSourceImage({
-        id: `source-${Date.now()}`,
-        kind: "source",
-        imagePath: reader.result,
+      void saveReferenceImage({
+        imageDataUrl: reader.result,
+        project,
+        conversation,
         name: file.name,
-        createdAt,
-      });
+      })
+        .then(setSourceImage)
+        .catch((error) => {
+          console.error("Could not save source image", error);
+        });
     });
     reader.readAsDataURL(file);
   };
@@ -277,11 +282,7 @@ export function PromptPanel() {
             }}
           >
             <span>
-              {t(
-                locale,
-                workflowOptions.find((option) => option.value === workflowMode)
-                  ?.labelKey ?? "textGridWorkflow",
-              )}
+              {activeWorkflowConfig.name}
             </span>
             <ChevronDown
               className={isWorkflowOpen ? "select-arrow open" : "select-arrow"}
@@ -298,23 +299,23 @@ export function PromptPanel() {
               aria-labelledby="workflow-select"
             >
               {workflowOptions.map((option) => {
-                const isSelected = workflowMode === option.value;
+                const isSelected = workflowMode === option.id;
 
                 return (
                   <button
                     className={
                       isSelected ? "select-option selected" : "select-option"
                     }
-                    key={option.value}
+                    key={option.id}
                     role="option"
                     aria-selected={isSelected}
                     type="button"
                     onClick={() => {
-                      setWorkflowMode(option.value);
+                      setWorkflowMode(option.id);
                       setIsWorkflowOpen(false);
                     }}
                   >
-                    <span>{t(locale, option.labelKey)}</span>
+                    <span>{option.name}</span>
                     {isSelected ? <Check size={16} aria-hidden="true" /> : null}
                   </button>
                 );
@@ -322,6 +323,7 @@ export function PromptPanel() {
             </div>
           ) : null}
         </div>
+        <p className="workflow-description">{activeWorkflowConfig.description}</p>
       </section>
 
       <section className="panel-section">
@@ -353,7 +355,7 @@ export function PromptPanel() {
             <div className="idea-attachment">
               <img
                 alt={mainDetail.sourceImage.name ?? t(locale, "sourceImage")}
-                src={mainDetail.sourceImage.imagePath}
+                src={getImageSource(mainDetail.sourceImage.imagePath)}
               />
               <div>
                 <strong title={mainDetail.sourceImage.name}>
@@ -603,6 +605,14 @@ export function PromptPanel() {
       )}
     </aside>
   );
+}
+
+function getImageSource(imagePath: string) {
+  if (imagePath.startsWith("data:image/")) {
+    return imagePath;
+  }
+
+  return isTauri() ? convertFileSrc(imagePath) : imagePath;
 }
 
 function formatModelChoice(

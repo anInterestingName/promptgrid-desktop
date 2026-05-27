@@ -10,6 +10,7 @@ import type {
   ResponseVerbosity,
   TextModelSettings,
 } from "../../types";
+import { normalizeWorkflowConfigs } from "../workflows/workflowConfig";
 import { providerAdapters, providerSupportsCapability } from "./providerAdapters";
 
 const validGridSizes = [6, 9, 16, 25] as const satisfies readonly GridSize[];
@@ -59,6 +60,8 @@ export function normalizeSettings(settings: Partial<AppSettings>): AppSettings {
       legacySettings,
       providers,
     ),
+    workflowConfigs: normalizeWorkflowConfigs(settings.workflowConfigs),
+    showWorkflowConfigEditor: settings.showWorkflowConfigEditor ?? true,
     defaultGridSize: normalizeGridSize(settings.defaultGridSize),
     debugLogRetentionDays: clampDebugLogRetentionDays(
       settings.debugLogRetentionDays,

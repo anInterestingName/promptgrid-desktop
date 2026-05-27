@@ -6,6 +6,7 @@ import type {
   MockVisual,
   Project,
 } from "../types";
+import { fallbackWorkflowConfigs } from "../modules/workflows/workflowConfig";
 
 const now = new Date().toISOString();
 
@@ -121,6 +122,8 @@ export const mockSettings: AppSettings = {
       providerId: "openai",
     },
   },
+  workflowConfigs: fallbackWorkflowConfigs,
+  showWorkflowConfigEditor: true,
   debugLoggingEnabled: false,
   debugLogRetentionDays: 7,
   maxConcurrency: 3,

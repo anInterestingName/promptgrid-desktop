@@ -32,7 +32,15 @@ import type {
   ModelOption,
   ProviderConfig,
   ProviderId,
+  WorkflowConfig,
+  WorkflowMode,
 } from "../../types";
+import {
+  createWorkflowTemplateVariables,
+  loadExternalWorkflowConfigs,
+  renderWorkflowAnalysisTemplate,
+  workflowTemplateVariableNames,
+} from "../workflows/workflowConfig";
 import {
   FetchModelsControl,
   FieldLabel,
@@ -72,6 +80,8 @@ const storageStatusKeys = {
 
 export function SettingsWorkspace() {
   const locale = usePromptGridStore((state) => state.locale);
+  const project = usePromptGridStore((state) => state.project);
+  const mainDetail = usePromptGridStore((state) => state.mainDetail);
   const settings = usePromptGridStore((state) => state.settings);
   const storageStatus = usePromptGridStore((state) => state.storageStatus);
   const updateSettings = usePromptGridStore((state) => state.updateSettings);
@@ -102,6 +112,12 @@ export function SettingsWorkspace() {
   const [debugLogStatus, setDebugLogStatus] =
     useState<StorageActionStatus>("idle");
   const [debugLogNotice, setDebugLogNotice] = useState<ModelNotice | null>(null);
+  const [workflowConfigStatus, setWorkflowConfigStatus] =
+    useState<StorageActionStatus>("idle");
+  const [workflowConfigNotice, setWorkflowConfigNotice] =
+    useState<ModelNotice | null>(null);
+  const [selectedWorkflowId, setSelectedWorkflowId] =
+    useState<WorkflowMode>("text-grid");
   const [selectedProviderId, setSelectedProviderId] = useState<ProviderId>(
     settings.activeModelSelection.text.providerId,
   );
@@ -154,6 +170,55 @@ export function SettingsWorkspace() {
       },
     });
     setModelTestStatus(`${providerId}:image`, "idle");
+  };
+
+  const selectedWorkflowConfig = settings.workflowConfigs[selectedWorkflowId];
+  const workflowPromptPreview = renderWorkflowAnalysisTemplate(
+    selectedWorkflowConfig.analysisTemplate,
+    createWorkflowTemplateVariables({
+      project,
+      hasSourceImage: Boolean(mainDetail.sourceImage),
+    }),
+  );
+
+  const updateWorkflowConfig = (update: Partial<WorkflowConfig>) => {
+    updateSettings({
+      workflowConfigs: {
+        ...settings.workflowConfigs,
+        [selectedWorkflowId]: {
+          ...selectedWorkflowConfig,
+          ...update,
+          id: selectedWorkflowId,
+        },
+      },
+    });
+  };
+
+  const reloadWorkflowConfigs = async () => {
+    setWorkflowConfigStatus("loading");
+    setWorkflowConfigNotice(null);
+
+    try {
+      const workflowConfigs = await loadExternalWorkflowConfigs();
+      if (!workflowConfigs) {
+        throw new Error("Workflow config file returned no workflows");
+      }
+
+      updateSettings({ workflowConfigs });
+      setWorkflowConfigStatus("ready");
+      setWorkflowConfigNotice({
+        titleKey: "workflowConfigReloaded",
+        tone: "success",
+        message: t(locale, "workflowConfigReloadedMessage"),
+      });
+    } catch (error) {
+      setWorkflowConfigStatus("error");
+      setWorkflowConfigNotice({
+        titleKey: "workflowConfigReloadError",
+        tone: "error",
+        message: getErrorMessage(error),
+      });
+    }
   };
 
   useEffect(() => {
@@ -873,6 +938,172 @@ export function SettingsWorkspace() {
             </div>
           </div>
         </div>
+      </div>
+
+      <div className="settings-section">
+        <SectionHeader
+          icon={FileText}
+          locale={locale}
+          titleKey="developerWorkflowConfig"
+        />
+        <div className="settings-fields">
+          <label className="settings-check">
+            <input
+              checked={settings.showWorkflowConfigEditor}
+              type="checkbox"
+              onChange={(event) =>
+                updateSetting("showWorkflowConfigEditor", event.target.checked)
+              }
+            />
+            <span>{t(locale, "showWorkflowConfigEditor")}</span>
+          </label>
+          <p className="settings-help">{t(locale, "workflowConfigHint")}</p>
+        </div>
+        {settings.showWorkflowConfigEditor ? (
+          <>
+            <SettingsNoticeSlot
+              locale={locale}
+              notice={workflowConfigNotice}
+              onDismiss={() => setWorkflowConfigNotice(null)}
+            />
+            <div className="workflow-template-editor">
+              <div
+                className="provider-picker"
+                role="tablist"
+                aria-label={t(locale, "workflowConfigSelect")}
+              >
+                {Object.values(settings.workflowConfigs)
+                  .sort((left, right) => left.sortOrder - right.sortOrder)
+                  .map((workflow) => (
+                    <button
+                      aria-selected={selectedWorkflowId === workflow.id}
+                      className={
+                        selectedWorkflowId === workflow.id
+                          ? "provider-picker-button active"
+                          : "provider-picker-button"
+                      }
+                      key={workflow.id}
+                      role="tab"
+                      type="button"
+                      onClick={() => setSelectedWorkflowId(workflow.id)}
+                    >
+                      <span className="provider-picker-name">
+                        <FileText size={16} aria-hidden="true" />
+                        <strong>{workflow.name}</strong>
+                      </span>
+                      <span className="provider-picker-meta">
+                        {workflow.executionStrategy}
+                      </span>
+                    </button>
+                  ))}
+              </div>
+
+              <div className="settings-fields two-columns">
+                <label className="settings-field">
+                  <span>{t(locale, "workflowConfigName")}</span>
+                  <input
+                    className="settings-input"
+                    value={selectedWorkflowConfig.name}
+                    onChange={(event) =>
+                      updateWorkflowConfig({ name: event.target.value })
+                    }
+                  />
+                </label>
+                <label className="settings-field">
+                  <span>{t(locale, "workflowConfigSortOrder")}</span>
+                  <input
+                    className="number-input"
+                    type="number"
+                    value={selectedWorkflowConfig.sortOrder}
+                    onChange={(event) =>
+                      updateWorkflowConfig({
+                        sortOrder: Number(event.target.value) || 0,
+                      })
+                    }
+                  />
+                </label>
+                <label className="settings-check">
+                  <input
+                    checked={selectedWorkflowConfig.enabled}
+                    type="checkbox"
+                    onChange={(event) =>
+                      updateWorkflowConfig({ enabled: event.target.checked })
+                    }
+                  />
+                  <span>{t(locale, "workflowConfigEnabled")}</span>
+                </label>
+                <label className="settings-field">
+                  <span>{t(locale, "workflowConfigStrategy")}</span>
+                  <input
+                    className="settings-input"
+                    readOnly
+                    value={selectedWorkflowConfig.executionStrategy}
+                  />
+                </label>
+              </div>
+
+              <label className="settings-field wide-field">
+                <span>{t(locale, "workflowConfigDescription")}</span>
+                <textarea
+                  className="settings-textarea"
+                  value={selectedWorkflowConfig.description}
+                  onChange={(event) =>
+                    updateWorkflowConfig({ description: event.target.value })
+                  }
+                />
+              </label>
+
+              <label className="settings-field wide-field">
+                <span>{t(locale, "workflowConfigTemplate")}</span>
+                <textarea
+                  className="settings-textarea workflow-template-textarea"
+                  spellCheck={false}
+                  value={selectedWorkflowConfig.analysisTemplate}
+                  onChange={(event) =>
+                    updateWorkflowConfig({
+                      analysisTemplate: event.target.value,
+                    })
+                  }
+                />
+              </label>
+
+              <div
+                className="workflow-variable-list"
+                aria-label={t(locale, "workflowConfigVariables")}
+              >
+                {workflowTemplateVariableNames.map((variable) => (
+                  <code key={variable}>{`{{${variable}}}`}</code>
+                ))}
+              </div>
+
+              <label className="settings-field wide-field">
+                <span>{t(locale, "workflowConfigPreview")}</span>
+                <textarea
+                  className="settings-textarea workflow-template-preview"
+                  readOnly
+                  value={workflowPromptPreview}
+                />
+              </label>
+
+              <div className="settings-actions-row">
+                <button
+                  className="secondary-action compact-action"
+                  disabled={workflowConfigStatus === "loading"}
+                  type="button"
+                  onClick={() => void reloadWorkflowConfigs()}
+                >
+                  <FileText size={16} aria-hidden="true" />
+                  {t(
+                    locale,
+                    workflowConfigStatus === "loading"
+                      ? "workflowConfigReloading"
+                      : "workflowConfigReload",
+                  )}
+                </button>
+              </div>
+            </div>
+          </>
+        ) : null}
       </div>
 
       <div className="settings-section">

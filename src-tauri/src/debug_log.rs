@@ -207,6 +207,8 @@ fn sanitize_json_value(value: &Value) -> Value {
                 .map(|(key, value)| {
                     if is_sensitive_key(key) {
                         (key.clone(), Value::String("[redacted]".to_string()))
+                    } else if is_inline_image_key(key, value) {
+                        (key.clone(), Value::String("[redacted image data]".to_string()))
                     } else {
                         (key.clone(), sanitize_json_value(value))
                     }
@@ -227,6 +229,13 @@ fn is_sensitive_key(key: &str) -> bool {
         || normalized.contains("token")
         || normalized.contains("secret")
         || normalized == "key"
+}
+
+fn is_inline_image_key(key: &str, value: &Value) -> bool {
+    key.eq_ignore_ascii_case("image_url")
+        && value
+            .as_str()
+            .is_some_and(|value| value.trim_start().starts_with("data:image/"))
 }
 
 fn truncate_string(value: &str, max_chars: usize) -> String {

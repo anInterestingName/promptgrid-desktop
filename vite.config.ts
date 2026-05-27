@@ -41,10 +41,15 @@ type DevProviderProxyRequest = {
   imageQuality?: "auto" | "low" | "medium" | "high";
   kind?: "text" | "image";
   model?: string;
-  originalPrompt?: string;
   outputSize?: string;
   provider?: string;
   prompt?: string;
+  referenceImages?: Array<{
+    id: string;
+    role: string;
+    imagePath: string;
+    name?: string;
+  }>;
   quality?: string;
   reasoningEnabled?: boolean;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh";
@@ -106,7 +111,7 @@ async function handleAnalyzePrompts(
   const unifiedRequest = buildUnifiedProviderRequest(body, {
     model,
     operation: "analyzePromptDirections",
-    prompt: buildPromptAnalysisInput(body, gridSize),
+    prompt: requireField(body.prompt, "Workflow analysis prompt"),
     streamResponses: false,
   });
   const providerAdapter = getProviderCompatibilityAdapter(body.provider);
@@ -333,26 +338,6 @@ async function handleImageModelTest(
   });
 }
 
-function buildPromptAnalysisInput(
-  request: DevProviderProxyRequest,
-  gridSize: number,
-) {
-  return [
-    "You create image-generation prompt directions for a visual exploration grid.",
-    `Return exactly ${gridSize} distinct directions and one short chat title as strict JSON with this shape:`,
-    `{"conversationTitle":"short title for this exploration","directions":[{"title":"concise direction title","prompt":"full image generation prompt"}]}`,
-    "Do not include markdown, commentary, numbering, or extra keys.",
-    "The conversationTitle should summarize the original idea in 3 to 8 words and use the same language as the original idea.",
-    "Each title should be 2 to 6 words, concrete, and in the same language as the original idea.",
-    `Original idea: ${requireField(request.originalPrompt, "Original prompt")}`,
-    `Visual style: ${request.style || "Editorial product study"}`,
-    `Aspect ratio: ${request.aspectRatio || "1:1"}`,
-    `Render quality target: ${request.quality || "draft"}`,
-    `Output size target: ${request.outputSize || "standard"}`,
-    "Each prompt should be specific, production-ready, and visually different from the others.",
-  ].join("\n");
-}
-
 function parsePromptDirections(output: string, gridSize: number) {
   const parsed = parseJsonFromText(output) as {
     conversationTitle?: unknown;
@@ -423,6 +408,7 @@ function buildUnifiedProviderRequest(
     reasoningEffort: request.reasoningEffort,
     responseVerbosity: request.responseVerbosity,
     streamResponses: request.streamResponses,
+    referenceImages: request.referenceImages,
     ...update,
   } as UnifiedProviderRequest;
 }

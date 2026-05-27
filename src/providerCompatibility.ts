@@ -35,6 +35,12 @@ export type UnifiedProviderRequest = ProviderRuntimeOptions & {
     | "generatePromptImage";
   provider?: ProviderIdLike;
   prompt?: string;
+  referenceImages?: Array<{
+    id: string;
+    role: string;
+    imagePath: string;
+    name?: string;
+  }>;
   image?: {
     aspectRatio?: string;
     background?: "auto" | "transparent" | "opaque";
@@ -101,6 +107,7 @@ const responsesProviderAdapter: ProviderAdapter = {
             model,
             input: buildResponsesUserInput(
               requireField(request.prompt, "Image prompt"),
+              request.referenceImages,
             ),
             tools: [buildImageGenerationTool(request, model)],
             tool_choice: {
@@ -203,7 +210,10 @@ const responsesProviderAdapter: ProviderAdapter = {
   },
 };
 
-function buildResponsesUserInput(prompt: string) {
+function buildResponsesUserInput(
+  prompt: string,
+  referenceImages: UnifiedProviderRequest["referenceImages"] = [],
+) {
   return [
     {
       type: "message",
@@ -213,6 +223,10 @@ function buildResponsesUserInput(prompt: string) {
           type: "input_text",
           text: prompt,
         },
+        ...referenceImages.map((reference) => ({
+          type: "input_image",
+          image_url: requireField(reference.imagePath, "Reference image"),
+        })),
       ],
     },
   ];
