@@ -8,6 +8,11 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { ContextMenu } from "./ContextMenu";
+import {
+  getContextMenuPosition,
+  type ContextMenuItem,
+} from "./contextMenuUtils";
 import { t, type Locale, type MessageKey } from "../i18n";
 import { openProjectFolder, pickDataDirectory } from "../services/localPersistence";
 import { getErrorMessage } from "../shared/utils/error";
@@ -38,25 +43,15 @@ function getProjectMenuPosition({
   boundaryRight: number;
   fallbackRight?: number;
 }) {
-  const hasRightSpace =
-    preferredX + projectContextMenuWidth + projectContextMenuGap <= boundaryRight;
-  const hasLeftSpace =
-    preferredX - projectContextMenuWidth - projectContextMenuGap >= 0;
-  const x = hasRightSpace
-    ? preferredX
-    : hasLeftSpace
-      ? (fallbackRight ?? preferredX) - projectContextMenuWidth
-      : Math.max(projectContextMenuGap, boundaryRight - projectContextMenuWidth);
-  const y =
-    preferredY + projectContextMenuHeight + projectContextMenuGap <=
-    window.innerHeight
-      ? preferredY
-      : Math.max(
-          projectContextMenuGap,
-          window.innerHeight - projectContextMenuHeight - projectContextMenuGap,
-        );
-
-  return { x, y };
+  return getContextMenuPosition({
+    preferredX,
+    preferredY,
+    width: projectContextMenuWidth,
+    height: projectContextMenuHeight,
+    gap: projectContextMenuGap,
+    boundaryRight,
+    fallbackRight,
+  });
 }
 
 export function ProjectSidebar() {
@@ -74,7 +69,6 @@ export function ProjectSidebar() {
   const startNewConversation = usePromptGridStore(
     (state) => state.startNewConversation,
   );
-  const openProject = usePromptGridStore((state) => state.openProject);
   const openConversation = usePromptGridStore((state) => state.openConversation);
   const renameProject = usePromptGridStore((state) => state.renameProject);
   const removeProject = usePromptGridStore((state) => state.removeProject);
@@ -111,23 +105,6 @@ export function ProjectSidebar() {
     () => sortByCreatedAt(conversations).slice(0, 4),
     [conversations],
   );
-
-  useEffect(() => {
-    if (!openProjectMenu) {
-      return;
-    }
-
-    function closeProjectMenu(event: PointerEvent) {
-      if (!(event.target as Element).closest(".project-tree-menu-shell")) {
-        setOpenProjectMenu(undefined);
-      }
-    }
-
-    document.addEventListener("pointerdown", closeProjectMenu, true);
-    return () => {
-      document.removeEventListener("pointerdown", closeProjectMenu, true);
-    };
-  }, [openProjectMenu]);
 
   function toggleProject(projectId: string) {
     setCollapsedProjectIds((current) => {
@@ -581,7 +558,11 @@ function ProjectMenu({
   onRemove: () => void;
 }) {
   return (
-    <div className="project-tree-menu-shell">
+    <div
+      className={
+        isOpen ? "project-tree-menu-shell open" : "project-tree-menu-shell"
+      }
+    >
       <button
         className="project-inline-action"
         type="button"
@@ -611,40 +592,61 @@ function ProjectMenu({
       >
         <MoreHorizontal size={16} aria-hidden="true" />
       </button>
-      {isOpen ? (
-        <div
-          className={
-            menuPosition?.x !== undefined && menuPosition.y !== undefined
-              ? "project-actions-menu context"
-              : "project-actions-menu"
-          }
-          role="menu"
-          aria-label={item.title}
-          style={
-            menuPosition?.x !== undefined && menuPosition.y !== undefined
-              ? {
-                  left: menuPosition.x,
-                  top: menuPosition.y,
-                }
-              : undefined
-          }
-        >
-          <button type="button" role="menuitem" onClick={onNewConversation}>
-            {t(locale, "newConversation")}
-          </button>
-          <button type="button" role="menuitem" onClick={onOpenFolder}>
-            {t(locale, "openInExplorer")}
-          </button>
-          <button type="button" role="menuitem" onClick={onRename}>
-            {t(locale, "renameProject")}
-          </button>
-          <button className="danger" type="button" role="menuitem" onClick={onRemove}>
-            {t(locale, "remove")}
-          </button>
-        </div>
+      {isOpen && menuPosition?.x !== undefined && menuPosition.y !== undefined ? (
+        <ContextMenu
+          ariaLabel={item.title}
+          className="project-context-menu"
+          items={getProjectContextMenuItems({
+            locale,
+            onNewConversation,
+            onOpenFolder,
+            onRename,
+            onRemove,
+          })}
+          position={{ x: menuPosition.x, y: menuPosition.y }}
+          onClose={() => onOpenChange(undefined)}
+        />
       ) : null}
     </div>
   );
+}
+
+function getProjectContextMenuItems({
+  locale,
+  onNewConversation,
+  onOpenFolder,
+  onRename,
+  onRemove,
+}: {
+  locale: Locale;
+  onNewConversation: () => void;
+  onOpenFolder: () => void;
+  onRename: () => void;
+  onRemove: () => void;
+}): ContextMenuItem[] {
+  return [
+    {
+      key: "new-conversation",
+      label: t(locale, "newConversation"),
+      onSelect: onNewConversation,
+    },
+    {
+      key: "open-folder",
+      label: t(locale, "openInExplorer"),
+      onSelect: onOpenFolder,
+    },
+    {
+      key: "rename-project",
+      label: t(locale, "renameProject"),
+      onSelect: onRename,
+    },
+    {
+      key: "remove-project",
+      label: t(locale, "remove"),
+      danger: true,
+      onSelect: onRemove,
+    },
+  ];
 }
 
 function ConversationButton({

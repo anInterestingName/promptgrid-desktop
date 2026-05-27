@@ -54,32 +54,10 @@ pub struct Conversation {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSettings {
-    api_provider: String,
-    text_model: String,
-    image_model: String,
-    #[serde(default = "default_open_ai_base_url")]
-    open_ai_base_url: String,
-    #[serde(default)]
-    open_ai_api_key_saved: bool,
-    #[serde(default, skip_serializing)]
-    open_ai_api_key: Option<String>,
-    custom_provider_name: Option<String>,
-    custom_base_url: Option<String>,
-    #[serde(default)]
-    custom_api_key_saved: bool,
-    #[serde(default, skip_serializing)]
-    custom_api_key: Option<String>,
-    custom_text_model: Option<String>,
-    custom_image_model: Option<String>,
-    custom_headers: Option<String>,
-    #[serde(default)]
-    reasoning_enabled: bool,
-    #[serde(default = "default_reasoning_effort")]
-    reasoning_effort: String,
-    #[serde(default = "default_response_verbosity")]
-    response_verbosity: String,
-    #[serde(default)]
-    stream_responses: bool,
+    #[serde(default = "default_provider_configs")]
+    providers: ProviderConfigs,
+    #[serde(default = "default_active_model_selection")]
+    active_model_selection: ActiveModelSelection,
     #[serde(default)]
     debug_logging_enabled: bool,
     #[serde(default = "default_debug_log_retention_days")]
@@ -88,6 +66,137 @@ pub struct AppSettings {
     default_grid_size: i64,
     default_aspect_ratio: String,
     output_directory: Option<String>,
+    #[serde(default, skip_serializing)]
+    api_provider: Option<String>,
+    #[serde(default, skip_serializing)]
+    text_model: Option<String>,
+    #[serde(default, skip_serializing)]
+    image_model: Option<String>,
+    #[serde(default, skip_serializing)]
+    open_ai_base_url: Option<String>,
+    #[serde(default, skip_serializing)]
+    open_ai_api_key_saved: Option<bool>,
+    #[serde(default, skip_serializing)]
+    open_ai_api_key: Option<String>,
+    #[serde(default, skip_serializing)]
+    custom_provider_name: Option<String>,
+    #[serde(default, skip_serializing)]
+    custom_base_url: Option<String>,
+    #[serde(default, skip_serializing)]
+    custom_api_key_saved: Option<bool>,
+    #[serde(default, skip_serializing)]
+    custom_api_key: Option<String>,
+    #[serde(default, skip_serializing)]
+    custom_text_model: Option<String>,
+    #[serde(default, skip_serializing)]
+    custom_image_model: Option<String>,
+    #[serde(default, skip_serializing)]
+    custom_headers: Option<String>,
+    #[serde(default, skip_serializing)]
+    reasoning_enabled: Option<bool>,
+    #[serde(default, skip_serializing)]
+    reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing)]
+    response_verbosity: Option<String>,
+    #[serde(default, skip_serializing)]
+    stream_responses: Option<bool>,
+    #[serde(default, skip_serializing)]
+    model_routing: Option<ModelRoutingSettings>,
+    #[serde(default, skip_serializing)]
+    text_runtime: Option<TextModelSettings>,
+    #[serde(default, skip_serializing)]
+    image_runtime: Option<TextModelSettings>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfigs {
+    #[serde(default = "default_openai_provider_config")]
+    openai: ProviderConfig,
+    #[serde(default = "default_deepseek_provider_config")]
+    deepseek: ProviderConfig,
+    #[serde(rename = "openai-compatible")]
+    #[serde(default = "default_openai_compatible_provider_config")]
+    openai_compatible: ProviderConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfig {
+    enabled: bool,
+    base_url: String,
+    #[serde(default)]
+    api_key_saved: bool,
+    custom_headers: Option<String>,
+    #[serde(default = "default_text_model_settings")]
+    text_model: TextModelSettings,
+    #[serde(default = "default_image_model_settings")]
+    image_model: ImageModelSettings,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveModelSelection {
+    text: ModelRoute,
+    image: ModelRoute,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRoute {
+    provider_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRoutingSettings {
+    text: LegacyModelRoute,
+    image: LegacyModelRoute,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyModelRoute {
+    provider_id: String,
+    model: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextModelSettings {
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    reasoning_enabled: bool,
+    #[serde(default = "default_reasoning_effort")]
+    reasoning_effort: String,
+    #[serde(default = "default_response_verbosity")]
+    response_verbosity: String,
+    #[serde(default)]
+    stream_responses: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageModelSettings {
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    reasoning_enabled: bool,
+    #[serde(default = "default_reasoning_effort")]
+    reasoning_effort: String,
+    #[serde(default = "default_response_verbosity")]
+    response_verbosity: String,
+    #[serde(default)]
+    stream_responses: bool,
+    #[serde(default = "default_image_quality")]
+    quality: String,
+    #[serde(default = "default_image_background")]
+    background: String,
+    #[serde(default = "default_image_output_format")]
+    output_format: String,
+    #[serde(default = "default_image_output_compression")]
+    output_compression: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1628,29 +1737,120 @@ fn null_terminated_wide(value: &str) -> Vec<u16> {
 
 fn default_settings() -> AppSettings {
     AppSettings {
-        api_provider: "openai".to_string(),
-        text_model: "gpt-4o-mini".to_string(),
-        image_model: "gpt-image-1".to_string(),
-        open_ai_base_url: "https://api.openai.com/v1".to_string(),
-        open_ai_api_key_saved: false,
-        open_ai_api_key: None,
-        custom_provider_name: None,
-        custom_base_url: None,
-        custom_api_key_saved: false,
-        custom_api_key: None,
-        custom_text_model: None,
-        custom_image_model: None,
-        custom_headers: None,
-        reasoning_enabled: false,
-        reasoning_effort: default_reasoning_effort(),
-        response_verbosity: default_response_verbosity(),
-        stream_responses: false,
+        providers: default_provider_configs(),
+        active_model_selection: default_active_model_selection(),
         debug_logging_enabled: false,
         debug_log_retention_days: default_debug_log_retention_days(),
         max_concurrency: 3,
         default_grid_size: 9,
         default_aspect_ratio: "1:1".to_string(),
         output_directory: None,
+        api_provider: None,
+        text_model: None,
+        image_model: None,
+        open_ai_base_url: None,
+        open_ai_api_key_saved: None,
+        open_ai_api_key: None,
+        custom_provider_name: None,
+        custom_base_url: None,
+        custom_api_key_saved: None,
+        custom_api_key: None,
+        custom_text_model: None,
+        custom_image_model: None,
+        custom_headers: None,
+        reasoning_enabled: None,
+        reasoning_effort: None,
+        response_verbosity: None,
+        stream_responses: None,
+        model_routing: None,
+        text_runtime: None,
+        image_runtime: None,
+    }
+}
+
+fn default_provider_configs() -> ProviderConfigs {
+    ProviderConfigs {
+        openai: default_openai_provider_config(),
+        deepseek: default_deepseek_provider_config(),
+        openai_compatible: default_openai_compatible_provider_config(),
+    }
+}
+
+fn default_openai_provider_config() -> ProviderConfig {
+    ProviderConfig {
+        enabled: true,
+        base_url: default_open_ai_base_url(),
+        api_key_saved: false,
+        custom_headers: None,
+        text_model: TextModelSettings {
+            model: "gpt-4o-mini".to_string(),
+            ..default_text_model_settings()
+        },
+        image_model: ImageModelSettings {
+            model: "gpt-image-1".to_string(),
+            stream_responses: true,
+            ..default_image_model_settings()
+        },
+    }
+}
+
+fn default_deepseek_provider_config() -> ProviderConfig {
+    ProviderConfig {
+        enabled: false,
+        base_url: "https://api.deepseek.com".to_string(),
+        api_key_saved: false,
+        custom_headers: None,
+        text_model: TextModelSettings {
+            model: "deepseek-chat".to_string(),
+            ..default_text_model_settings()
+        },
+        image_model: default_image_model_settings(),
+    }
+}
+
+fn default_openai_compatible_provider_config() -> ProviderConfig {
+    ProviderConfig {
+        enabled: false,
+        base_url: String::new(),
+        api_key_saved: false,
+        custom_headers: Some(String::new()),
+        text_model: default_text_model_settings(),
+        image_model: default_image_model_settings(),
+    }
+}
+
+fn default_active_model_selection() -> ActiveModelSelection {
+    ActiveModelSelection {
+        text: ModelRoute {
+            provider_id: "openai".to_string(),
+        },
+        image: ModelRoute {
+            provider_id: "openai".to_string(),
+        },
+    }
+}
+
+fn default_text_model_settings() -> TextModelSettings {
+    TextModelSettings {
+        model: String::new(),
+        reasoning_enabled: false,
+        reasoning_effort: default_reasoning_effort(),
+        response_verbosity: default_response_verbosity(),
+        stream_responses: false,
+    }
+}
+
+fn default_image_model_settings() -> ImageModelSettings {
+    ImageModelSettings {
+        model: String::new(),
+        reasoning_enabled: false,
+        reasoning_effort: default_reasoning_effort(),
+        response_verbosity: default_response_verbosity(),
+        stream_responses: true,
+        quality: default_image_quality(),
+        background: default_image_background(),
+        output_format: default_image_output_format(),
+        output_compression: default_image_output_compression(),
     }
 }
 
@@ -1670,11 +1870,29 @@ fn default_response_verbosity() -> String {
     "medium".to_string()
 }
 
+fn default_image_quality() -> String {
+    "auto".to_string()
+}
+
+fn default_image_background() -> String {
+    "auto".to_string()
+}
+
+fn default_image_output_format() -> String {
+    "png".to_string()
+}
+
+fn default_image_output_compression() -> i64 {
+    100
+}
+
 fn default_debug_log_retention_days() -> i64 {
     7
 }
 
 fn migrate_legacy_api_keys(settings: &mut AppSettings) -> Result<(), String> {
+    migrate_legacy_settings(settings);
+
     if let Some(api_key) = settings
         .open_ai_api_key
         .as_deref()
@@ -1691,7 +1909,7 @@ fn migrate_legacy_api_keys(settings: &mut AppSettings) -> Result<(), String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        crate::model_config::save_provider_api_key("custom", api_key)?;
+        crate::model_config::save_provider_api_key("openai-compatible", api_key)?;
         settings.custom_api_key = None;
     }
 
@@ -1699,6 +1917,189 @@ fn migrate_legacy_api_keys(settings: &mut AppSettings) -> Result<(), String> {
 }
 
 fn refresh_api_key_status(settings: &mut AppSettings) {
-    settings.open_ai_api_key_saved = crate::model_config::has_provider_api_key("openai");
-    settings.custom_api_key_saved = crate::model_config::has_provider_api_key("custom");
+    settings.providers.openai.api_key_saved = crate::model_config::has_provider_api_key("openai");
+    settings.providers.deepseek.api_key_saved =
+        crate::model_config::has_provider_api_key("deepseek");
+    settings.providers.openai_compatible.api_key_saved =
+        crate::model_config::has_provider_api_key("openai-compatible");
+}
+
+fn migrate_legacy_settings(settings: &mut AppSettings) {
+    let legacy_provider = settings.api_provider.as_deref();
+    let legacy_provider_id = if legacy_provider == Some("custom") {
+        "openai-compatible"
+    } else {
+        "openai"
+    };
+
+    if let Some(model_routing) = settings.model_routing.clone() {
+        settings.active_model_selection.text.provider_id =
+            normalize_provider_id(&model_routing.text.provider_id);
+        settings.active_model_selection.image.provider_id =
+            normalize_provider_id(&model_routing.image.provider_id);
+        set_provider_text_model(
+            settings,
+            model_routing.text.provider_id.as_str(),
+            model_routing.text.model.as_str(),
+        );
+        set_provider_image_model(
+            settings,
+            model_routing.image.provider_id.as_str(),
+            model_routing.image.model.as_str(),
+        );
+    }
+
+    if settings.api_provider.is_some() {
+        settings.active_model_selection.text.provider_id = legacy_provider_id.to_string();
+        settings.active_model_selection.image.provider_id = legacy_provider_id.to_string();
+    }
+
+    if let Some(text_model) = settings.text_model.clone() {
+        if legacy_provider_id == "openai" {
+            settings.providers.openai.text_model.model = text_model;
+        }
+    }
+
+    if let Some(image_model) = settings.image_model.clone() {
+        if legacy_provider_id == "openai" {
+            settings.providers.openai.image_model.model = image_model;
+        }
+    }
+
+    if let Some(text_model) = settings.custom_text_model.clone() {
+        if legacy_provider_id == "openai-compatible" {
+            settings.providers.openai_compatible.text_model.model = text_model;
+        }
+    }
+
+    if let Some(image_model) = settings.custom_image_model.clone() {
+        if legacy_provider_id == "openai-compatible" {
+            settings.providers.openai_compatible.image_model.model = image_model;
+        }
+    }
+
+    if let Some(base_url) = settings.open_ai_base_url.as_ref().filter(|value| !value.is_empty()) {
+        settings.providers.openai.base_url = base_url.clone();
+    }
+
+    if let Some(base_url) = settings.custom_base_url.as_ref().filter(|value| !value.is_empty()) {
+        settings.providers.openai_compatible.base_url = base_url.clone();
+        settings.providers.openai_compatible.enabled = true;
+    }
+
+    if let Some(headers) = settings.custom_headers.clone() {
+        settings.providers.openai_compatible.custom_headers = Some(headers);
+    }
+
+    if let Some(saved) = settings.open_ai_api_key_saved {
+        settings.providers.openai.api_key_saved = saved;
+        settings.providers.openai.enabled |= saved;
+    }
+
+    if let Some(saved) = settings.custom_api_key_saved {
+        settings.providers.openai_compatible.api_key_saved = saved;
+        settings.providers.openai_compatible.enabled |= saved;
+    }
+
+    let text_runtime = settings.text_runtime.as_ref();
+    let image_runtime = settings.image_runtime.as_ref();
+
+    if let Some(reasoning_enabled) = settings
+        .reasoning_enabled
+        .or_else(|| text_runtime.map(|runtime| runtime.reasoning_enabled))
+    {
+        settings.providers.openai.text_model.reasoning_enabled = reasoning_enabled;
+        settings.providers.openai_compatible.text_model.reasoning_enabled = reasoning_enabled;
+    }
+
+    if let Some(reasoning_effort) = settings
+        .reasoning_effort
+        .clone()
+        .or_else(|| text_runtime.map(|runtime| runtime.reasoning_effort.clone()))
+    {
+        settings.providers.openai.text_model.reasoning_effort = reasoning_effort.clone();
+        settings.providers.openai_compatible.text_model.reasoning_effort = reasoning_effort;
+    }
+
+    if let Some(response_verbosity) = settings.response_verbosity.clone() {
+        settings.providers.openai.text_model.response_verbosity = response_verbosity.clone();
+        settings.providers.openai_compatible.text_model.response_verbosity =
+            response_verbosity.clone();
+        settings.providers.openai.image_model.response_verbosity = response_verbosity.clone();
+        settings.providers.openai_compatible.image_model.response_verbosity = response_verbosity;
+    } else {
+        if let Some(runtime) = text_runtime {
+            settings.providers.openai.text_model.response_verbosity =
+                runtime.response_verbosity.clone();
+            settings.providers.openai_compatible.text_model.response_verbosity =
+                runtime.response_verbosity.clone();
+        }
+        if let Some(runtime) = image_runtime {
+            settings.providers.openai.image_model.response_verbosity =
+                runtime.response_verbosity.clone();
+            settings.providers.openai_compatible.image_model.response_verbosity =
+                runtime.response_verbosity.clone();
+        }
+    }
+
+    if let Some(stream_responses) = settings
+        .stream_responses
+        .or_else(|| text_runtime.map(|runtime| runtime.stream_responses))
+    {
+        settings.providers.openai.text_model.stream_responses = stream_responses;
+        settings.providers.openai_compatible.text_model.stream_responses = stream_responses;
+    }
+
+    settings.api_provider = None;
+    settings.text_model = None;
+    settings.image_model = None;
+    settings.open_ai_base_url = None;
+    settings.open_ai_api_key_saved = None;
+    settings.custom_provider_name = None;
+    settings.custom_base_url = None;
+    settings.custom_api_key_saved = None;
+    settings.custom_text_model = None;
+    settings.custom_image_model = None;
+    settings.custom_headers = None;
+    settings.reasoning_enabled = None;
+    settings.reasoning_effort = None;
+    settings.response_verbosity = None;
+    settings.stream_responses = None;
+    settings.model_routing = None;
+    settings.text_runtime = None;
+    settings.image_runtime = None;
+}
+
+fn set_provider_text_model(settings: &mut AppSettings, provider_id: &str, model: &str) {
+    let model = model.trim();
+    if model.is_empty() {
+        return;
+    }
+
+    match normalize_provider_id(provider_id).as_str() {
+        "openai-compatible" => settings.providers.openai_compatible.text_model.model = model.to_string(),
+        "deepseek" => settings.providers.deepseek.text_model.model = model.to_string(),
+        _ => settings.providers.openai.text_model.model = model.to_string(),
+    }
+}
+
+fn set_provider_image_model(settings: &mut AppSettings, provider_id: &str, model: &str) {
+    let model = model.trim();
+    if model.is_empty() {
+        return;
+    }
+
+    match normalize_provider_id(provider_id).as_str() {
+        "openai-compatible" => settings.providers.openai_compatible.image_model.model = model.to_string(),
+        "deepseek" => settings.providers.deepseek.image_model.model = model.to_string(),
+        _ => settings.providers.openai.image_model.model = model.to_string(),
+    }
+}
+
+fn normalize_provider_id(provider_id: &str) -> String {
+    if provider_id == "custom" {
+        "openai-compatible".to_string()
+    } else {
+        provider_id.to_string()
+    }
 }

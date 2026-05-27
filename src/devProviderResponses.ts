@@ -5,8 +5,17 @@ type ResponseTextState = {
   doneText: string;
 };
 
+type ResponseOutputItemState = {
+  functionCallArguments: string;
+  item: Record<string, unknown>;
+  reasoningSummaryText: string;
+  reasoningText: string;
+};
+
 type ResponsesStreamState = {
-  output: unknown[];
+  currentOutputItemId?: string;
+  output: ResponseOutputItemState[];
+  outputIndexes: Map<string, number>;
   text: ResponseTextState;
 };
 
@@ -22,9 +31,13 @@ export function hasResponsesImageOutput(responseText: string) {
   return hasImageGenerationOutput(parseResponsesBody(responseText));
 }
 
+export function extractResponsesError(responseText: string) {
+  return extractResponseError(parseResponsesBody(responseText));
+}
+
 export function parseResponsesBody(responseText: string): unknown {
   try {
-    return JSON.parse(responseText) as unknown;
+    return normalizeResponsesOutputItems(JSON.parse(responseText) as unknown);
   } catch {
     return parseResponsesStream(responseText);
   }
@@ -32,6 +45,7 @@ export function parseResponsesBody(responseText: string): unknown {
 
 function parseResponsesStream(responseText: string) {
   const state: ResponsesStreamState = {
+    outputIndexes: new Map(),
     output: [],
     text: {
       deltaText: "",
@@ -59,7 +73,7 @@ function parseResponsesStream(responseText: string) {
 
   return {
     output_text: getPreferredText(state.text),
-    output: state.output,
+    output: getOutputItems(state),
   };
 }
 
@@ -70,6 +84,10 @@ function applyResponsesStreamEvent(
   const eventType = typeof event.type === "string" ? event.type : "";
 
   switch (eventType) {
+    case "response.output_item.added":
+      captureStateOutputItem(event.item, state);
+      return undefined;
+
     case "response.output_text.delta":
       if (typeof event.delta === "string") {
         state.text.deltaText += event.delta;
@@ -94,14 +112,81 @@ function applyResponsesStreamEvent(
       captureOutputItem(event.item, state);
       return undefined;
 
+    case "response.function_call_arguments.delta":
+      if (typeof event.delta === "string") {
+        appendFunctionCallArguments(
+          ensureOutputItem(state, event, "function_call"),
+          event.delta,
+        );
+      }
+      return undefined;
+
+    case "response.function_call_arguments.done": {
+      const argumentsText =
+        typeof event.arguments === "string"
+          ? event.arguments
+          : typeof event.text === "string"
+            ? event.text
+            : "";
+      if (argumentsText) {
+        setFunctionCallArguments(
+          ensureOutputItem(state, event, "function_call"),
+          argumentsText,
+        );
+      }
+      return undefined;
+    }
+
+    case "response.reasoning.delta":
+      if (typeof event.delta === "string") {
+        appendReasoningText(
+          ensureOutputItem(state, event, "reasoning"),
+          event.delta,
+        );
+      }
+      return undefined;
+
+    case "response.reasoning_summary_text.delta":
+      if (typeof event.delta === "string") {
+        appendReasoningSummaryText(
+          ensureOutputItem(state, event, "reasoning"),
+          event.delta,
+        );
+      }
+      return undefined;
+
+    case "response.reasoning_summary_text.done":
+    case "response.reasoning.done": {
+      const text =
+        typeof event.text === "string"
+          ? event.text
+          : typeof event.summary_text === "string"
+            ? event.summary_text
+            : "";
+      if (text) {
+        setReasoningSummaryText(
+          ensureOutputItem(state, event, "reasoning"),
+          text,
+        );
+      }
+      return undefined;
+    }
+
     case "response.completed":
       return event.response
         ? mergeStreamTextIntoResponse(
             event.response,
             getPreferredText(state.text),
-            state.output,
+            getOutputItems(state),
           )
         : undefined;
+
+    case "response.failed":
+      return mergeStreamTextIntoResponse(
+        event.response ?? event,
+        getPreferredText(state.text),
+        getOutputItems(state),
+      );
 
     default:
       if (eventType.includes("image_generation_call")) {
@@ -115,19 +200,23 @@ function captureOutputItem(item: unknown, state: ResponsesStreamState) {
   const itemText = extractTextOutput(item);
   if (itemText) {
     state.text.doneText = itemText;
+    captureStateOutputItem(item, state);
     return;
   }
 
   if (hasEventItemResult(item)) {
-    state.output.push({
-      type: "image_generation_call",
-      result: item.result,
-    });
+    captureStateOutputItem(
+      {
+        type: "image_generation_call",
+        result: item.result,
+      },
+      state,
+    );
     return;
   }
 
   if (item) {
-    state.output.push(item);
+    captureStateOutputItem(item, state);
   }
 }
 
@@ -136,24 +225,206 @@ function captureImageEvent(
   state: ResponsesStreamState,
 ) {
   if (typeof event.result === "string" && event.result.trim()) {
-    state.output.push({
-      type: "image_generation_call",
-      result: event.result,
-    });
+    captureStateOutputItem(
+      {
+        type: "image_generation_call",
+        result: event.result,
+      },
+      state,
+    );
     return;
   }
 
   if (hasEventItemResult(event.item)) {
-    state.output.push({
-      type: "image_generation_call",
-      result: event.item.result,
-    });
+    captureStateOutputItem(
+      {
+        type: "image_generation_call",
+        result: event.item.result,
+      },
+      state,
+    );
     return;
   }
 
-  if (event.type !== "response.image_generation_call.partial_image" && event.item) {
-    state.output.push(event.item);
+  if (
+    event.type !== "response.image_generation_call.partial_image" &&
+    event.item
+  ) {
+    captureStateOutputItem(event.item, state);
   }
+}
+
+function captureStateOutputItem(item: unknown, state: ResponsesStreamState) {
+  if (!item || typeof item !== "object") {
+    return;
+  }
+
+  const itemState = createOutputItemState(item as Record<string, unknown>);
+  const itemId = typeof itemState.item.id === "string" ? itemState.item.id : "";
+  if (itemId) {
+    const existingIndex = state.outputIndexes.get(itemId);
+    if (existingIndex !== undefined) {
+      mergeOutputItemState(state.output[existingIndex], itemState);
+      state.currentOutputItemId = itemId;
+      return;
+    }
+
+    state.outputIndexes.set(itemId, state.output.length);
+    state.currentOutputItemId = itemId;
+  }
+
+  state.output.push(itemState);
+}
+
+function ensureOutputItem(
+  state: ResponsesStreamState,
+  event: Record<string, unknown>,
+  fallbackType: string,
+) {
+  const itemId =
+    readEventItemId(event) ??
+    (state.currentOutputItemId ? state.currentOutputItemId : undefined);
+
+  if (itemId) {
+    const existingIndex = state.outputIndexes.get(itemId);
+    if (existingIndex !== undefined) {
+      state.currentOutputItemId = itemId;
+      return state.output[existingIndex];
+    }
+
+    const itemState = createOutputItemState({
+      id: itemId,
+      type: fallbackType,
+    });
+    state.outputIndexes.set(itemId, state.output.length);
+    state.output.push(itemState);
+    state.currentOutputItemId = itemId;
+    return itemState;
+  }
+
+  const itemState = createOutputItemState({
+    type: fallbackType,
+  });
+  state.output.push(itemState);
+  return itemState;
+}
+
+function readEventItemId(event: Record<string, unknown>) {
+  for (const key of ["item_id", "output_item_id", "id"]) {
+    const value = event[key];
+    if (typeof value === "string" && value.trim()) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+function createOutputItemState(
+  item: Record<string, unknown>,
+): ResponseOutputItemState {
+  return {
+    functionCallArguments:
+      typeof item.arguments === "string" ? item.arguments : "",
+    item: { ...item },
+    reasoningSummaryText: extractReasoningSummaryText(item),
+    reasoningText: "",
+  };
+}
+
+function mergeOutputItemState(
+  target: ResponseOutputItemState,
+  source: ResponseOutputItemState,
+) {
+  if (!target.functionCallArguments.trim()) {
+    target.functionCallArguments = source.functionCallArguments;
+  }
+
+  if (!target.reasoningSummaryText.trim()) {
+    target.reasoningSummaryText = source.reasoningSummaryText;
+  }
+
+  if (!target.reasoningText.trim()) {
+    target.reasoningText = source.reasoningText;
+  }
+
+  mergeJsonObject(target.item, source.item);
+}
+
+function appendFunctionCallArguments(
+  itemState: ResponseOutputItemState,
+  delta: string,
+) {
+  itemState.functionCallArguments += delta;
+  itemState.item.arguments = itemState.functionCallArguments;
+}
+
+function setFunctionCallArguments(
+  itemState: ResponseOutputItemState,
+  argumentsText: string,
+) {
+  itemState.functionCallArguments = argumentsText;
+  itemState.item.arguments = argumentsText;
+}
+
+function appendReasoningText(
+  itemState: ResponseOutputItemState,
+  delta: string,
+) {
+  itemState.reasoningText += delta;
+  itemState.item.type ??= "reasoning";
+  const content = Array.isArray(itemState.item.content)
+    ? itemState.item.content
+    : [];
+  content.push({
+    type: "reasoning_text",
+    text: delta,
+  });
+  itemState.item.content = content;
+}
+
+function appendReasoningSummaryText(
+  itemState: ResponseOutputItemState,
+  delta: string,
+) {
+  itemState.reasoningSummaryText += delta;
+  setReasoningSummaryText(itemState, itemState.reasoningSummaryText);
+}
+
+function setReasoningSummaryText(
+  itemState: ResponseOutputItemState,
+  text: string,
+) {
+  itemState.reasoningSummaryText = text;
+  itemState.item.type ??= "reasoning";
+  itemState.item.summary = [
+    {
+      type: "summary_text",
+      text,
+    },
+  ];
+}
+
+function getOutputItems(state: ResponsesStreamState) {
+  return state.output.map((itemState) => finalizeOutputItem(itemState));
+}
+
+function finalizeOutputItem(itemState: ResponseOutputItemState) {
+  const item = { ...itemState.item };
+  if (itemState.functionCallArguments.trim()) {
+    item.arguments = itemState.functionCallArguments;
+  }
+
+  if (itemState.reasoningSummaryText.trim()) {
+    item.summary = [
+      {
+        type: "summary_text",
+        text: itemState.reasoningSummaryText,
+      },
+    ];
+  }
+
+  return item;
 }
 
 export function extractTextOutput(responseJson: unknown) {
@@ -205,13 +476,17 @@ function mergeStreamTextIntoResponse(
     return response;
   }
 
-  if (extractTextOutput(response)) {
-    return response;
+  const nextResponse = normalizeResponsesOutputItems(response) as Record<
+    string,
+    unknown
+  >;
+  const hasExtractableText = Boolean(extractTextOutput(nextResponse));
+  if (hasExtractableText && output.length === 0) {
+    return nextResponse;
   }
 
-  const nextResponse = { ...(response as Record<string, unknown>) };
   const trimmedOutputText = outputText.trim();
-  if (trimmedOutputText) {
+  if (!hasExtractableText && trimmedOutputText) {
     nextResponse.output_text = trimmedOutputText;
   }
 
@@ -223,6 +498,69 @@ function mergeStreamTextIntoResponse(
   }
 
   return nextResponse;
+}
+
+function normalizeResponsesOutputItems(response: unknown) {
+  if (!response || typeof response !== "object") {
+    return response;
+  }
+
+  const normalizedResponse = { ...(response as Record<string, unknown>) };
+  const output = normalizedResponse.output;
+  if (Array.isArray(output)) {
+    normalizedResponse.output = output.map((item) => {
+      if (!item || typeof item !== "object") {
+        return item;
+      }
+
+      return finalizeOutputItem(
+        createOutputItemState(item as Record<string, unknown>),
+      );
+    });
+  }
+
+  return normalizedResponse;
+}
+
+function mergeJsonObject(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+) {
+  for (const [key, value] of Object.entries(source)) {
+    if (value === null || value === undefined) {
+      continue;
+    }
+
+    const existing = target[key];
+    if (isPlainObject(existing) && isPlainObject(value)) {
+      mergeJsonObject(
+        existing as Record<string, unknown>,
+        value as Record<string, unknown>,
+      );
+    } else if (existing === undefined || valueIsEmpty(existing)) {
+      target[key] = value;
+    }
+  }
+}
+
+function valueIsEmpty(value: unknown) {
+  if (value === null || value === undefined) {
+    return true;
+  }
+
+  if (typeof value === "string") {
+    return !value.trim();
+  }
+
+  if (Array.isArray(value)) {
+    return value.length === 0;
+  }
+
+  return isPlainObject(value) && Object.keys(value).length === 0;
+}
+
+function isPlainObject(value: unknown) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function parseJsonEvent(data: string) {
@@ -243,6 +581,51 @@ function parseJsonEvent(data: string) {
 
 function getPreferredText(text: ResponseTextState) {
   return text.doneText || text.deltaText;
+}
+
+function extractResponseError(responseJson: unknown) {
+  if (!responseJson || typeof responseJson !== "object") {
+    return "";
+  }
+
+  const response = responseJson as {
+    error?: unknown;
+    message?: unknown;
+    status?: unknown;
+  };
+  if (
+    response.status !== "failed" &&
+    (response.error === undefined || response.error === null)
+  ) {
+    return "";
+  }
+
+  if (response.error && typeof response.error === "object") {
+    const errorMessage =
+      (response.error as { message?: unknown }).message ??
+      (response.error as { error?: unknown }).error;
+    if (typeof errorMessage === "string" && errorMessage.trim()) {
+      return errorMessage.trim();
+    }
+  }
+
+  if (typeof response.message === "string" && response.message.trim()) {
+    return response.message.trim();
+  }
+
+  return "Provider returned a failed response";
+}
+
+function extractReasoningSummaryText(item: Record<string, unknown>) {
+  const summary = item.summary;
+  if (!Array.isArray(summary)) {
+    return "";
+  }
+
+  return summary
+    .map((summaryItem) => extractTextContent(summaryItem))
+    .filter(Boolean)
+    .join("\n");
 }
 
 function hasEventItemResult(item: unknown): item is { result: string } {

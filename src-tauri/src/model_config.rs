@@ -6,10 +6,12 @@ use reqwest::header::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::time::{Duration, Instant};
 
 const SECRET_SERVICE: &str = "PromptGrid Desktop";
+const PROMPT_ANALYSIS_TIMEOUT_SECS: u64 = 180;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -76,12 +78,21 @@ pub struct ImageGenerateRequest {
     base_url: String,
     custom_headers: Option<String>,
     image_model: String,
+    image_quality: Option<String>,
+    image_background: Option<String>,
+    image_output_format: Option<String>,
+    image_output_compression: Option<i64>,
     prompt: String,
     aspect_ratio: String,
     quality: String,
     #[serde(default = "default_output_size")]
     output_size: String,
+    #[serde(default)]
+    reasoning_enabled: bool,
+    reasoning_effort: Option<String>,
     response_verbosity: Option<String>,
+    #[serde(default)]
+    stream_responses: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -113,6 +124,47 @@ struct ModelsResponse {
 struct ModelResponseItem {
     id: String,
     owned_by: Option<String>,
+}
+
+struct UnifiedProviderRequest {
+    operation: ProviderOperation,
+    provider: String,
+    base_url: String,
+    model: Option<String>,
+    prompt: Option<String>,
+    reasoning_enabled: bool,
+    reasoning_effort: Option<String>,
+    response_verbosity: Option<String>,
+    stream_responses: bool,
+    image: Option<UnifiedImageRequest>,
+}
+
+struct UnifiedImageRequest {
+    aspect_ratio: Option<String>,
+    output_size: Option<String>,
+    project_quality: Option<String>,
+    image_quality: Option<String>,
+    background: Option<String>,
+    output_format: Option<String>,
+    output_compression: Option<i64>,
+}
+
+enum ProviderOperation {
+    TestTextModel,
+    TestImageModel,
+    AnalyzePromptDirections,
+    GeneratePromptImage,
+}
+
+struct ProviderHttpRequest {
+    method: &'static str,
+    url: String,
+    body: Option<Value>,
+}
+
+enum UnifiedProviderResponse {
+    Text(String),
+    Image(String),
 }
 
 pub fn save_provider_api_key(provider: &str, api_key: &str) -> Result<bool, String> {
@@ -273,38 +325,50 @@ pub fn analyze_prompt_directions(
     apply_default_provider_headers(&mut headers);
 
     let client = Client::builder()
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(PROMPT_ANALYSIS_TIMEOUT_SECS))
         .build()
         .map_err(|error| format!("Could not create HTTP client: {error}"))?;
     let grid_size = request.grid_size.clamp(1, 25);
-    let mut body = json!({
-        "model": model,
-        "input": build_prompt_analysis_input(&request, grid_size)
-    });
-    apply_response_runtime_parameters(
-        &mut body,
-        request.reasoning_enabled,
-        request.reasoning_effort.as_deref(),
-        request.response_verbosity.as_deref(),
-        false,
-    );
-    let responses_url = build_responses_url(&request.base_url)?;
+    let unified_request = UnifiedProviderRequest {
+        operation: ProviderOperation::AnalyzePromptDirections,
+        provider: request.provider.clone(),
+        base_url: request.base_url.clone(),
+        model: Some(model.to_string()),
+        prompt: Some(build_prompt_analysis_input(&request, grid_size)),
+        reasoning_enabled: request.reasoning_enabled,
+        reasoning_effort: request.reasoning_effort.clone(),
+        response_verbosity: request.response_verbosity.clone(),
+        stream_responses: false,
+        image: None,
+    };
+    let provider_request = build_provider_http_request(&unified_request)?;
     let started_at = Instant::now();
 
     let response = client
-        .post(&responses_url)
+        .post(&provider_request.url)
         .headers(headers)
-        .json(&body)
+        .json(
+            provider_request
+                .body
+                .as_ref()
+                .ok_or_else(|| "Provider request body is required".to_string())?,
+        )
         .send()
         .map_err(|error| {
-            let message = format!("Could not analyze prompt directions: {error}");
+            let message = if error.is_timeout() {
+                format!(
+                    "Prompt analysis timed out after {PROMPT_ANALYSIS_TIMEOUT_SECS} seconds waiting for the provider. Try lowering the text model reasoning effort or retrying with a faster model."
+                )
+            } else {
+                format!("Could not analyze prompt directions: {error}")
+            };
             crate::debug_log::log_provider_request(
                 "analyze_prompt_directions",
                 Some(&request.provider),
                 Some(model),
-                "POST",
-                &responses_url,
-                Some(&body),
+                provider_request.method,
+                &provider_request.url,
+                provider_request.body.as_ref(),
                 None,
                 None,
                 started_at.elapsed().as_millis(),
@@ -318,9 +382,9 @@ pub fn analyze_prompt_directions(
         "analyze_prompt_directions",
         Some(&request.provider),
         Some(model),
-        "POST",
-        &responses_url,
-        Some(&body),
+        provider_request.method,
+        &provider_request.url,
+        provider_request.body.as_ref(),
         Some(&response_text),
         Some(status.as_u16()),
         started_at.elapsed().as_millis(),
@@ -334,10 +398,14 @@ pub fn analyze_prompt_directions(
         ));
     }
 
-    let response_json = parse_responses_api_body(&response_text)
-        .map_err(|error| format!("Could not parse prompt analysis response: {error}"))?;
-    let output = extract_text_output(&response_json)
-        .ok_or_else(|| "Prompt analysis returned an empty response".to_string())?;
+    let output = match parse_provider_response(&unified_request, &response_text)
+        .map_err(|error| format!("Could not parse prompt analysis response: {error}"))?
+    {
+        UnifiedProviderResponse::Text(output) => output,
+        UnifiedProviderResponse::Image(_) => {
+            return Err("Prompt analysis returned an incompatible response".to_string());
+        }
+    };
 
     parse_prompt_directions(&output, grid_size)
 }
@@ -367,36 +435,38 @@ pub fn generate_prompt_image(request: ImageGenerateRequest) -> Result<GeneratedI
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|error| format!("Could not create HTTP client: {error}"))?;
-    let mut body = json!({
-        "model": model,
-        "input": prompt,
-        "tools": [
-            build_image_generation_tool(
-                &request.aspect_ratio,
-                &request.output_size,
-                model,
-                &request.provider,
-                Some(&request.quality)
-            )
-        ],
-        "tool_choice": {
-            "type": "image_generation"
-        }
-    });
-    apply_response_runtime_parameters(
-        &mut body,
-        false,
-        None,
-        request.response_verbosity.as_deref(),
-        true,
-    );
-    let responses_url = build_responses_url(&request.base_url)?;
+    let unified_request = UnifiedProviderRequest {
+        operation: ProviderOperation::GeneratePromptImage,
+        provider: request.provider.clone(),
+        base_url: request.base_url.clone(),
+        model: Some(model.to_string()),
+        prompt: Some(prompt.to_string()),
+        reasoning_enabled: request.reasoning_enabled,
+        reasoning_effort: request.reasoning_effort.clone(),
+        response_verbosity: request.response_verbosity.clone(),
+        stream_responses: request.stream_responses,
+        image: Some(UnifiedImageRequest {
+            aspect_ratio: Some(request.aspect_ratio.clone()),
+            output_size: Some(request.output_size.clone()),
+            project_quality: Some(request.quality.clone()),
+            image_quality: request.image_quality.clone(),
+            background: request.image_background.clone(),
+            output_format: request.image_output_format.clone(),
+            output_compression: request.image_output_compression,
+        }),
+    };
+    let provider_request = build_provider_http_request(&unified_request)?;
     let started_at = Instant::now();
 
     let response = client
-        .post(&responses_url)
+        .post(&provider_request.url)
         .headers(headers)
-        .json(&body)
+        .json(
+            provider_request
+                .body
+                .as_ref()
+                .ok_or_else(|| "Provider request body is required".to_string())?,
+        )
         .send()
         .map_err(|error| {
             let message = format!("Could not generate image: {error}");
@@ -404,9 +474,9 @@ pub fn generate_prompt_image(request: ImageGenerateRequest) -> Result<GeneratedI
                 "generate_prompt_image",
                 Some(&request.provider),
                 Some(model),
-                "POST",
-                &responses_url,
-                Some(&body),
+                provider_request.method,
+                &provider_request.url,
+                provider_request.body.as_ref(),
                 None,
                 None,
                 started_at.elapsed().as_millis(),
@@ -428,9 +498,9 @@ pub fn generate_prompt_image(request: ImageGenerateRequest) -> Result<GeneratedI
                 "generate_prompt_image",
                 Some(&request.provider),
                 Some(model),
-                "POST",
-                &responses_url,
-                Some(&body),
+                provider_request.method,
+                &provider_request.url,
+                provider_request.body.as_ref(),
                 Some(&response_text),
                 Some(status.as_u16()),
                 started_at.elapsed().as_millis(),
@@ -442,19 +512,52 @@ pub fn generate_prompt_image(request: ImageGenerateRequest) -> Result<GeneratedI
             ));
         }
 
-        let image_base64 = read_image_generation_stream(response)?;
+        let image_base64 = read_image_generation_stream(response).map_err(|failure| {
+            let response_text = (!failure.response_text.trim().is_empty())
+                .then_some(failure.response_text.as_str());
+            crate::debug_log::log_provider_request(
+                "generate_prompt_image",
+                Some(&request.provider),
+                Some(model),
+                provider_request.method,
+                &provider_request.url,
+                provider_request.body.as_ref(),
+                response_text,
+                Some(status.as_u16()),
+                started_at.elapsed().as_millis(),
+                Some(&failure.message),
+            );
+            failure.message
+        })?;
+        let stream_response_text = json!({
+            "output": [
+                {
+                    "type": "image_generation_call",
+                    "result": image_base64
+                }
+            ]
+        })
+        .to_string();
         crate::debug_log::log_provider_request(
             "generate_prompt_image",
             Some(&request.provider),
             Some(model),
-            "POST",
-            &responses_url,
-            Some(&body),
+            provider_request.method,
+            &provider_request.url,
+            provider_request.body.as_ref(),
             Some(&json!({ "imageBase64": image_base64 }).to_string()),
             Some(status.as_u16()),
             started_at.elapsed().as_millis(),
             None,
         );
+        let image_base64 = match parse_provider_response(&unified_request, &stream_response_text)
+            .map_err(|error| format!("Could not parse image generation stream: {error}"))?
+        {
+            UnifiedProviderResponse::Image(image_base64) => image_base64,
+            UnifiedProviderResponse::Text(_) => {
+                return Err("Image generation returned an incompatible response".to_string());
+            }
+        };
         return Ok(GeneratedImage {
             image_data_url: format!("data:image/png;base64,{image_base64}"),
         });
@@ -465,9 +568,9 @@ pub fn generate_prompt_image(request: ImageGenerateRequest) -> Result<GeneratedI
         "generate_prompt_image",
         Some(&request.provider),
         Some(model),
-        "POST",
-        &responses_url,
-        Some(&body),
+        provider_request.method,
+        &provider_request.url,
+        provider_request.body.as_ref(),
         Some(&response_text),
         Some(status.as_u16()),
         started_at.elapsed().as_millis(),
@@ -480,10 +583,14 @@ pub fn generate_prompt_image(request: ImageGenerateRequest) -> Result<GeneratedI
         ));
     }
 
-    let response_json = parse_responses_api_body(&response_text)
-        .map_err(|error| format!("Could not parse image generation response: {error}"))?;
-    let image_base64 = extract_image_base64(&response_json)
-        .ok_or_else(|| "Image model returned no image output".to_string())?;
+    let image_base64 = match parse_provider_response(&unified_request, &response_text)
+        .map_err(|error| format!("Could not parse image generation response: {error}"))?
+    {
+        UnifiedProviderResponse::Image(image_base64) => image_base64,
+        UnifiedProviderResponse::Text(_) => {
+            return Err("Image generation returned an incompatible response".to_string());
+        }
+    };
 
     Ok(GeneratedImage {
         image_data_url: format!("data:image/png;base64,{image_base64}"),
@@ -497,23 +604,29 @@ fn test_text_model(
     model: &str,
     request: &ModelTestRequest,
 ) -> Result<ModelTestResult, String> {
-    let responses_url = build_responses_url(base_url)?;
-    let mut body = json!({
-        "model": model,
-        "input": "Reply with exactly: OK"
-    });
-    apply_response_runtime_parameters(
-        &mut body,
-        request.reasoning_enabled,
-        request.reasoning_effort.as_deref(),
-        request.response_verbosity.as_deref(),
-        request.stream_responses,
-    );
+    let unified_request = UnifiedProviderRequest {
+        operation: ProviderOperation::TestTextModel,
+        provider: request.provider.clone(),
+        base_url: base_url.to_string(),
+        model: Some(model.to_string()),
+        prompt: None,
+        reasoning_enabled: request.reasoning_enabled,
+        reasoning_effort: request.reasoning_effort.clone(),
+        response_verbosity: request.response_verbosity.clone(),
+        stream_responses: request.stream_responses,
+        image: None,
+    };
+    let provider_request = build_provider_http_request(&unified_request)?;
     let started_at = Instant::now();
     let response = client
-        .post(&responses_url)
+        .post(&provider_request.url)
         .headers(headers)
-        .json(&body)
+        .json(
+            provider_request
+                .body
+                .as_ref()
+                .ok_or_else(|| "Provider request body is required".to_string())?,
+        )
         .send()
         .map_err(|error| {
             let message = format!("Could not test model connection: {error}");
@@ -521,9 +634,9 @@ fn test_text_model(
                 "test_text_model",
                 Some(&request.provider),
                 Some(model),
-                "POST",
-                &responses_url,
-                Some(&body),
+                provider_request.method,
+                &provider_request.url,
+                provider_request.body.as_ref(),
                 None,
                 None,
                 started_at.elapsed().as_millis(),
@@ -537,9 +650,9 @@ fn test_text_model(
         "test_text_model",
         Some(&request.provider),
         Some(model),
-        "POST",
-        &responses_url,
-        Some(&body),
+        provider_request.method,
+        &provider_request.url,
+        provider_request.body.as_ref(),
         Some(&response_text),
         Some(status.as_u16()),
         started_at.elapsed().as_millis(),
@@ -553,10 +666,14 @@ fn test_text_model(
         ));
     }
 
-    let response_json = parse_responses_api_body(&response_text)
-        .map_err(|error| format!("Could not parse model test response: {error}"))?;
-    let output = extract_text_output(&response_json)
-        .ok_or_else(|| "Model returned an empty response".to_string())?;
+    let output = match parse_provider_response(&unified_request, &response_text)
+        .map_err(|error| format!("Could not parse model test response: {error}"))?
+    {
+        UnifiedProviderResponse::Text(output) => output,
+        UnifiedProviderResponse::Image(_) => {
+            return Err("Text model test returned an incompatible response".to_string());
+        }
+    };
 
     Ok(ModelTestResult {
         model: model.to_string(),
@@ -571,31 +688,37 @@ fn test_image_model(
     model: &str,
     request: &ModelTestRequest,
 ) -> Result<ModelTestResult, String> {
-    let responses_url = build_responses_url(base_url)?;
-    let mut body = json!({
-        "model": model,
-        "input": "Generate a simple image of a small blue square on a white background.",
-        "tools": [
-            {
-                "type": "image_generation"
-            }
-        ],
-        "tool_choice": {
-            "type": "image_generation"
-        }
-    });
-    apply_response_runtime_parameters(
-        &mut body,
-        request.reasoning_enabled,
-        request.reasoning_effort.as_deref(),
-        request.response_verbosity.as_deref(),
-        false,
-    );
+    let unified_request = UnifiedProviderRequest {
+        operation: ProviderOperation::TestImageModel,
+        provider: request.provider.clone(),
+        base_url: base_url.to_string(),
+        model: Some(model.to_string()),
+        prompt: None,
+        reasoning_enabled: request.reasoning_enabled,
+        reasoning_effort: request.reasoning_effort.clone(),
+        response_verbosity: request.response_verbosity.clone(),
+        stream_responses: false,
+        image: Some(UnifiedImageRequest {
+            aspect_ratio: None,
+            output_size: None,
+            project_quality: None,
+            image_quality: None,
+            background: None,
+            output_format: None,
+            output_compression: None,
+        }),
+    };
+    let provider_request = build_provider_http_request(&unified_request)?;
     let started_at = Instant::now();
     let response = client
-        .post(&responses_url)
+        .post(&provider_request.url)
         .headers(headers)
-        .json(&body)
+        .json(
+            provider_request
+                .body
+                .as_ref()
+                .ok_or_else(|| "Provider request body is required".to_string())?,
+        )
         .send()
         .map_err(|error| {
             let message = format!("Could not test image model connection: {error}");
@@ -603,9 +726,9 @@ fn test_image_model(
                 "test_image_model",
                 Some(&request.provider),
                 Some(model),
-                "POST",
-                &responses_url,
-                Some(&body),
+                provider_request.method,
+                &provider_request.url,
+                provider_request.body.as_ref(),
                 None,
                 None,
                 started_at.elapsed().as_millis(),
@@ -619,9 +742,9 @@ fn test_image_model(
         "test_image_model",
         Some(&request.provider),
         Some(model),
-        "POST",
-        &responses_url,
-        Some(&body),
+        provider_request.method,
+        &provider_request.url,
+        provider_request.body.as_ref(),
         Some(&response_text),
         Some(status.as_u16()),
         started_at.elapsed().as_millis(),
@@ -635,10 +758,13 @@ fn test_image_model(
         ));
     }
 
-    let response_json = parse_responses_api_body(&response_text)
-        .map_err(|error| format!("Could not parse image model test response: {error}"))?;
-    if !has_image_generation_output(&response_json) {
-        return Err("Image model returned no image output".to_string());
+    match parse_provider_response(&unified_request, &response_text)
+        .map_err(|error| format!("Could not parse image model test response: {error}"))?
+    {
+        UnifiedProviderResponse::Image(_) => {}
+        UnifiedProviderResponse::Text(_) => {
+            return Err("Image model test returned an incompatible response".to_string());
+        }
     }
 
     Ok(ModelTestResult {
@@ -652,9 +778,186 @@ fn get_provider_api_key(provider: &str) -> Result<Option<String>, String> {
 
     match entry.get_password() {
         Ok(api_key) => Ok(Some(api_key)),
-        Err(KeyringError::NoEntry) => Ok(None),
+        Err(KeyringError::NoEntry) => get_legacy_provider_api_key(provider),
         Err(error) => Err(format!("Could not read API key: {error}")),
     }
+}
+
+fn get_legacy_provider_api_key(provider: &str) -> Result<Option<String>, String> {
+    if provider != "openai-compatible" {
+        return Ok(None);
+    }
+
+    let legacy_entry = Entry::new(SECRET_SERVICE, "custom-provider-api-key")
+        .map_err(|error| format!("Could not open legacy keyring: {error}"))?;
+    match legacy_entry.get_password() {
+        Ok(api_key) => {
+            save_provider_api_key(provider, &api_key)?;
+            Ok(Some(api_key))
+        }
+        Err(KeyringError::NoEntry) => Ok(None),
+        Err(error) => Err(format!("Could not read legacy API key: {error}")),
+    }
+}
+
+fn build_provider_http_request(
+    request: &UnifiedProviderRequest,
+) -> Result<ProviderHttpRequest, String> {
+    match request.operation {
+        ProviderOperation::TestTextModel | ProviderOperation::AnalyzePromptDirections => {
+            let model = require_model(request, "Text model")?;
+            let prompt = match request.operation {
+                ProviderOperation::TestTextModel => "Reply with exactly: OK".to_string(),
+                _ => require_prompt(request, "Text prompt")?.to_string(),
+            };
+            let mut body = json!({
+                "model": model,
+                "input": build_responses_user_input(&prompt),
+            });
+            apply_response_runtime_parameters(
+                &mut body,
+                request.reasoning_enabled,
+                request.reasoning_effort.as_deref(),
+                request.response_verbosity.as_deref(),
+                request.stream_responses,
+            );
+
+            Ok(ProviderHttpRequest {
+                method: "POST",
+                url: build_responses_url(&request.base_url)?,
+                body: Some(body),
+            })
+        }
+        ProviderOperation::TestImageModel => {
+            let model = require_model(request, "Image model")?;
+            let mut body = json!({
+                "model": model,
+                "input": build_responses_user_input(
+                    "Generate a simple image of a small blue square on a white background."
+                ),
+                "tools": [
+                    {
+                        "type": "image_generation"
+                    }
+                ],
+                "tool_choice": {
+                    "type": "image_generation"
+                }
+            });
+            apply_response_runtime_parameters(
+                &mut body,
+                request.reasoning_enabled,
+                request.reasoning_effort.as_deref(),
+                request.response_verbosity.as_deref(),
+                false,
+            );
+
+            Ok(ProviderHttpRequest {
+                method: "POST",
+                url: build_responses_url(&request.base_url)?,
+                body: Some(body),
+            })
+        }
+        ProviderOperation::GeneratePromptImage => {
+            let model = require_model(request, "Image model")?;
+            let image = request
+                .image
+                .as_ref()
+                .ok_or_else(|| "Image request options are required".to_string())?;
+            let mut body = json!({
+                "model": model,
+                "input": build_responses_user_input(require_prompt(request, "Image prompt")?),
+                "tools": [
+                    build_image_generation_tool(
+                        image.aspect_ratio.as_deref().unwrap_or("1:1"),
+                        image.output_size.as_deref().unwrap_or("standard"),
+                        model,
+                        &request.provider,
+                        image.project_quality.as_deref(),
+                        image.image_quality.as_deref(),
+                        image.background.as_deref(),
+                        image.output_format.as_deref(),
+                        image.output_compression,
+                        request.stream_responses,
+                    )
+                ],
+                "tool_choice": {
+                    "type": "image_generation"
+                }
+            });
+            apply_response_runtime_parameters(
+                &mut body,
+                request.reasoning_enabled,
+                request.reasoning_effort.as_deref(),
+                request.response_verbosity.as_deref(),
+                request.stream_responses,
+            );
+
+            Ok(ProviderHttpRequest {
+                method: "POST",
+                url: build_responses_url(&request.base_url)?,
+                body: Some(body),
+            })
+        }
+    }
+}
+
+fn build_responses_user_input(prompt: &str) -> Value {
+    json!([
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "input_text",
+                    "text": prompt
+                }
+            ]
+        }
+    ])
+}
+
+fn parse_provider_response(
+    request: &UnifiedProviderRequest,
+    response_text: &str,
+) -> Result<UnifiedProviderResponse, String> {
+    let response_json = parse_responses_api_body(response_text)
+        .map_err(|error| format!("Could not parse provider response: {error}"))?;
+
+    if let Some(error) = extract_response_error(&response_json) {
+        return Err(error);
+    }
+
+    match request.operation {
+        ProviderOperation::TestTextModel | ProviderOperation::AnalyzePromptDirections => {
+            let output = extract_text_output(&response_json)
+                .ok_or_else(|| "Model returned an empty response".to_string())?;
+            Ok(UnifiedProviderResponse::Text(output))
+        }
+        ProviderOperation::TestImageModel | ProviderOperation::GeneratePromptImage => {
+            let image_base64 = extract_image_base64(&response_json)
+                .ok_or_else(|| "Image model returned no image output".to_string())?;
+            Ok(UnifiedProviderResponse::Image(image_base64))
+        }
+    }
+}
+
+fn require_model<'a>(request: &'a UnifiedProviderRequest, label: &str) -> Result<&'a str, String> {
+    request
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{label} is required"))
+}
+
+fn require_prompt<'a>(request: &'a UnifiedProviderRequest, label: &str) -> Result<&'a str, String> {
+    request
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("{label} is required"))
 }
 
 fn apply_response_runtime_parameters(
@@ -704,17 +1007,40 @@ fn build_image_generation_tool(
     model: &str,
     provider: &str,
     quality: Option<&str>,
+    image_quality: Option<&str>,
+    background: Option<&str>,
+    output_format: Option<&str>,
+    output_compression: Option<i64>,
+    stream_responses: bool,
 ) -> Value {
     let mut tool = json!({
         "type": "image_generation",
         "size": map_image_size(aspect_ratio, output_size, model, provider)
     });
 
-    if let Some(quality) = quality {
-        tool["quality"] = json!(map_image_quality(quality));
+    tool["quality"] = json!(map_image_quality(image_quality, quality));
+
+    if let Some(background) = background
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "auto")
+    {
+        tool["background"] = json!(background);
     }
 
-    if provider == "openai" {
+    if let Some(output_format) = output_format
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "png")
+    {
+        tool["output_format"] = json!(output_format);
+    }
+
+    if let Some(output_compression) = output_compression {
+        if output_compression < 100 {
+            tool["output_compression"] = json!(output_compression.clamp(0, 100));
+        }
+    }
+
+    if supports_partial_image_streaming(model) && stream_responses {
         tool["partial_images"] = json!(1);
     }
 
@@ -724,7 +1050,8 @@ fn build_image_generation_tool(
 fn provider_entry(provider: &str) -> Result<Entry, String> {
     let account = match provider {
         "openai" => "openai-api-key",
-        "custom" => "custom-provider-api-key",
+        "deepseek" => "deepseek-api-key",
+        "openai-compatible" => "openai-compatible-provider-api-key",
         _ => return Err("Unsupported provider".to_string()),
     };
 
@@ -732,43 +1059,34 @@ fn provider_entry(provider: &str) -> Result<Entry, String> {
 }
 
 fn build_models_url(base_url: &str) -> Result<String, String> {
-    let trimmed = base_url.trim().trim_end_matches('/');
-    if trimmed.is_empty() {
-        return Err("Base URL is required".to_string());
-    }
-
-    if trimmed.ends_with("/models") {
-        return Ok(trimmed.to_string());
-    }
-
-    if trimmed.ends_with("/v1") {
-        return Ok(format!("{trimmed}/models"));
-    }
-
-    Ok(format!("{trimmed}/v1/models"))
+    build_endpoint_url(base_url, "models")
 }
 
 fn build_responses_url(base_url: &str) -> Result<String, String> {
+    build_endpoint_url(base_url, "responses")
+}
+
+fn build_endpoint_url(base_url: &str, endpoint: &str) -> Result<String, String> {
     let trimmed = base_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
         return Err("Base URL is required".to_string());
     }
 
-    if trimmed.ends_with("/responses") {
+    if trimmed.ends_with(&format!("/{endpoint}")) {
         return Ok(trimmed.to_string());
     }
 
-    if let Some(v1_base_url) = trimmed.strip_suffix("/models") {
-        if v1_base_url.ends_with("/v1") {
-            return Ok(format!("{v1_base_url}/responses"));
+    let alternate_endpoint = match endpoint {
+        "models" => "responses",
+        _ => "models",
+    };
+    if let Some(base) = trimmed.strip_suffix(alternate_endpoint) {
+        if base.ends_with('/') {
+            return Ok(format!("{base}{endpoint}"));
         }
     }
 
-    if trimmed.ends_with("/v1") {
-        return Ok(format!("{trimmed}/responses"));
-    }
-
-    Ok(format!("{trimmed}/v1/responses"))
+    Ok(format!("{trimmed}/{endpoint}"))
 }
 
 fn apply_custom_headers(
@@ -838,7 +1156,12 @@ fn is_event_stream_content_type(value: &str) -> bool {
     value.to_ascii_lowercase().contains("text/event-stream")
 }
 
-fn read_image_generation_stream(response: Response) -> Result<String, String> {
+struct ImageStreamFailure {
+    message: String,
+    response_text: String,
+}
+
+fn read_image_generation_stream(response: Response) -> Result<String, ImageStreamFailure> {
     let mut reader = BufReader::new(response);
     let mut line = String::new();
     let mut data_lines = Vec::new();
@@ -848,7 +1171,10 @@ fn read_image_generation_stream(response: Response) -> Result<String, String> {
         line.clear();
         let byte_count = reader
             .read_line(&mut line)
-            .map_err(|error| format!("Could not read image generation stream: {error}"))?;
+            .map_err(|error| ImageStreamFailure {
+                message: format!("Could not read image generation stream: {error}"),
+                response_text: String::new(),
+            })?;
 
         if byte_count == 0 {
             break;
@@ -860,6 +1186,9 @@ fn read_image_generation_stream(response: Response) -> Result<String, String> {
                 ImageStreamEvent::Image(result) => return Ok(result),
                 ImageStreamEvent::FallbackImage(result) => {
                     fallback_image_base64 = Some(result);
+                }
+                ImageStreamEvent::Failure(failure) => {
+                    return Err(failure);
                 }
                 ImageStreamEvent::Done => break,
                 ImageStreamEvent::Continue => {}
@@ -879,22 +1208,30 @@ fn read_image_generation_stream(response: Response) -> Result<String, String> {
             ImageStreamEvent::FallbackImage(result) => {
                 fallback_image_base64 = Some(result);
             }
+            ImageStreamEvent::Failure(failure) => {
+                return Err(failure);
+            }
             ImageStreamEvent::Done | ImageStreamEvent::Continue => {}
         }
     }
 
-    fallback_image_base64
-        .ok_or_else(|| "Image generation stream ended without a final image output".to_string())
+    fallback_image_base64.ok_or_else(|| ImageStreamFailure {
+        message: "Image generation stream ended without a final image output".to_string(),
+        response_text: String::new(),
+    })
 }
 
 enum ImageStreamEvent {
     Image(String),
     FallbackImage(String),
+    Failure(ImageStreamFailure),
     Done,
     Continue,
 }
 
-fn process_image_stream_event(data_lines: &[String]) -> Result<ImageStreamEvent, String> {
+fn process_image_stream_event(
+    data_lines: &[String],
+) -> Result<ImageStreamEvent, ImageStreamFailure> {
     if data_lines.is_empty() {
         return Ok(ImageStreamEvent::Continue);
     }
@@ -910,11 +1247,17 @@ fn process_image_stream_event(data_lines: &[String]) -> Result<ImageStreamEvent,
             return Ok(ImageStreamEvent::Continue);
         }
         Err(error) => {
-            return Err(format!("Could not parse image generation stream event: {error}"));
+            return Err(ImageStreamFailure {
+                message: format!("Could not parse image generation stream event: {error}"),
+                response_text: data,
+            });
         }
     };
 
-    let event_type = event.get("type").and_then(Value::as_str).unwrap_or_default();
+    let event_type = event
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     if event_type == "response.image_generation_call.partial_image" {
         return Ok(ImageStreamEvent::Continue);
     }
@@ -933,10 +1276,28 @@ fn process_image_stream_event(data_lines: &[String]) -> Result<ImageStreamEvent,
 
     if event_type == "response.completed" {
         if let Some(response) = event.get("response") {
+            if let Some(error) = extract_response_error(response)
+                .filter(|_| extract_image_base64(response).is_none())
+            {
+                return Err(ImageStreamFailure {
+                    message: error,
+                    response_text: data,
+                });
+            }
+
             if let Some(result) = extract_image_base64(response) {
                 return Ok(ImageStreamEvent::Image(result));
             }
         }
+    }
+
+    if event_type == "response.failed" {
+        let response = event.get("response").unwrap_or(&event);
+        return Ok(ImageStreamEvent::Failure(ImageStreamFailure {
+            message: extract_response_error(response)
+                .unwrap_or_else(|| "Image generation stream failed".to_string()),
+            response_text: data,
+        }));
     }
 
     if let Some(result) = extract_image_result_from_event(&event) {
@@ -1007,6 +1368,8 @@ fn event_stream_is_complete(line: &str) -> bool {
     data == "[DONE]"
         || data.contains("\"type\":\"response.completed\"")
         || data.contains("\"type\": \"response.completed\"")
+        || data.contains("\"type\":\"response.failed\"")
+        || data.contains("\"type\": \"response.failed\"")
 }
 
 fn header_value(headers: &HeaderMap, name: HeaderName) -> Option<String> {
@@ -1060,7 +1423,8 @@ fn extract_text_output(response_json: &Value) -> Option<String> {
 }
 
 fn parse_responses_api_body(response_text: &str) -> Result<Value, serde_json::Error> {
-    if let Ok(response_json) = serde_json::from_str::<Value>(response_text) {
+    if let Ok(mut response_json) = serde_json::from_str::<Value>(response_text) {
+        normalize_responses_output_items(&mut response_json);
         return Ok(response_json);
     }
 
@@ -1084,7 +1448,7 @@ fn parse_responses_api_body(response_text: &str) -> Result<Value, serde_json::Er
 
     Ok(json!({
         "output_text": state.preferred_text(),
-        "output": state.output
+        "output": state.output_items()
     }))
 }
 
@@ -1092,7 +1456,9 @@ fn parse_responses_api_body(response_text: &str) -> Result<Value, serde_json::Er
 struct ResponsesStreamState {
     delta_text: String,
     done_text: String,
-    output: Vec<Value>,
+    output: Vec<ResponsesOutputItemState>,
+    output_indexes: HashMap<String, usize>,
+    current_output_item_id: Option<String>,
 }
 
 impl ResponsesStreamState {
@@ -1103,10 +1469,159 @@ impl ResponsesStreamState {
             self.done_text.as_str()
         }
     }
+
+    fn output_items(&self) -> Vec<Value> {
+        self.output
+            .iter()
+            .map(ResponsesOutputItemState::to_value)
+            .collect()
+    }
+
+    fn capture_output_item(&mut self, item: &Value) {
+        let item_state = ResponsesOutputItemState::from_value(item.clone());
+        if let Some(item_id) = item_state.id().map(str::to_string) {
+            if let Some(index) = self.output_indexes.get(&item_id).copied() {
+                self.output[index].merge(item_state);
+                self.current_output_item_id = Some(item_id);
+                return;
+            }
+
+            let index = self.output.len();
+            self.output_indexes.insert(item_id.clone(), index);
+            self.current_output_item_id = Some(item_id);
+        }
+
+        self.output.push(item_state);
+    }
+
+    fn ensure_output_item(
+        &mut self,
+        event: &Value,
+        fallback_type: &str,
+    ) -> &mut ResponsesOutputItemState {
+        let item_id = event
+            .get("item_id")
+            .or_else(|| event.get("output_item_id"))
+            .or_else(|| event.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| self.current_output_item_id.clone());
+
+        if let Some(item_id) = item_id {
+            if let Some(index) = self.output_indexes.get(&item_id).copied() {
+                self.current_output_item_id = Some(item_id);
+                return &mut self.output[index];
+            }
+
+            let index = self.output.len();
+            self.output
+                .push(ResponsesOutputItemState::from_value(json!({
+                    "id": item_id,
+                    "type": fallback_type
+                })));
+            self.output_indexes.insert(item_id.clone(), index);
+            self.current_output_item_id = Some(item_id);
+            return &mut self.output[index];
+        }
+
+        let index = self.output.len();
+        self.output.push(ResponsesOutputItemState::from_value(
+            json!({ "type": fallback_type }),
+        ));
+        &mut self.output[index]
+    }
+}
+
+struct ResponsesOutputItemState {
+    item: Value,
+    function_call_arguments: String,
+    reasoning_text: String,
+    reasoning_summary_text: String,
+}
+
+impl ResponsesOutputItemState {
+    fn from_value(item: Value) -> Self {
+        let function_call_arguments = item
+            .get("arguments")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let reasoning_summary_text = extract_reasoning_summary_text(&item).unwrap_or_default();
+
+        Self {
+            item,
+            function_call_arguments,
+            reasoning_text: String::new(),
+            reasoning_summary_text,
+        }
+    }
+
+    fn id(&self) -> Option<&str> {
+        self.item.get("id").and_then(Value::as_str)
+    }
+
+    fn merge(&mut self, next: ResponsesOutputItemState) {
+        if self.function_call_arguments.trim().is_empty() {
+            self.function_call_arguments = next.function_call_arguments;
+        }
+
+        if self.reasoning_text.trim().is_empty() {
+            self.reasoning_text = next.reasoning_text;
+        }
+
+        if self.reasoning_summary_text.trim().is_empty() {
+            self.reasoning_summary_text = next.reasoning_summary_text;
+        }
+
+        merge_json_object(&mut self.item, next.item);
+    }
+
+    fn append_function_call_arguments(&mut self, delta: &str) {
+        self.function_call_arguments.push_str(delta);
+        set_string_field(&mut self.item, "arguments", &self.function_call_arguments);
+    }
+
+    fn set_function_call_arguments(&mut self, arguments: &str) {
+        self.function_call_arguments = arguments.to_string();
+        set_string_field(&mut self.item, "arguments", arguments);
+    }
+
+    fn append_reasoning_text(&mut self, delta: &str) {
+        self.reasoning_text.push_str(delta);
+        append_reasoning_content(&mut self.item, delta);
+    }
+
+    fn append_reasoning_summary_text(&mut self, delta: &str) {
+        self.reasoning_summary_text.push_str(delta);
+        set_reasoning_summary_text(&mut self.item, &self.reasoning_summary_text);
+    }
+
+    fn set_reasoning_summary_text(&mut self, text: &str) {
+        self.reasoning_summary_text = text.to_string();
+        set_reasoning_summary_text(&mut self.item, text);
+    }
+
+    fn to_value(&self) -> Value {
+        let mut item = self.item.clone();
+        if !self.function_call_arguments.trim().is_empty() {
+            set_string_field(&mut item, "arguments", &self.function_call_arguments);
+        }
+
+        if !self.reasoning_summary_text.trim().is_empty() {
+            set_reasoning_summary_text(&mut item, &self.reasoning_summary_text);
+        }
+
+        item
+    }
 }
 
 fn apply_responses_stream_event(event: &Value, state: &mut ResponsesStreamState) -> Option<Value> {
     match event.get("type").and_then(Value::as_str) {
+        Some("response.output_item.added") => {
+            if let Some(item) = event.get("item") {
+                state.capture_output_item(item);
+            }
+        }
         Some("response.output_text.delta") => {
             if let Some(delta) = event.get("delta").and_then(Value::as_str) {
                 state.delta_text.push_str(delta);
@@ -1131,14 +1646,68 @@ fn apply_responses_stream_event(event: &Value, state: &mut ResponsesStreamState)
                 capture_responses_output_item(item, state);
             }
         }
+        Some("response.function_call_arguments.delta") => {
+            if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+                state
+                    .ensure_output_item(event, "function_call")
+                    .append_function_call_arguments(delta);
+            }
+        }
+        Some("response.function_call_arguments.done") => {
+            let arguments = event
+                .get("arguments")
+                .or_else(|| event.get("text"))
+                .and_then(Value::as_str);
+            if let Some(arguments) = arguments {
+                state
+                    .ensure_output_item(event, "function_call")
+                    .set_function_call_arguments(arguments);
+            }
+        }
+        Some("response.reasoning.delta") => {
+            if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+                state
+                    .ensure_output_item(event, "reasoning")
+                    .append_reasoning_text(delta);
+            }
+        }
+        Some("response.reasoning_summary_text.delta") => {
+            if let Some(delta) = event.get("delta").and_then(Value::as_str) {
+                state
+                    .ensure_output_item(event, "reasoning")
+                    .append_reasoning_summary_text(delta);
+            }
+        }
+        Some("response.reasoning_summary_text.done") | Some("response.reasoning.done") => {
+            let text = event
+                .get("text")
+                .or_else(|| event.get("summary_text"))
+                .and_then(Value::as_str);
+            if let Some(text) = text {
+                state
+                    .ensure_output_item(event, "reasoning")
+                    .set_reasoning_summary_text(text);
+            }
+        }
         Some("response.completed") => {
             if let Some(response) = event.get("response") {
                 return Some(merge_stream_text_into_response(
                     response.clone(),
                     state.preferred_text(),
-                    &state.output,
+                    &state.output_items(),
                 ));
             }
+        }
+        Some("response.failed") => {
+            let response = event
+                .get("response")
+                .cloned()
+                .unwrap_or_else(|| event.clone());
+            return Some(merge_stream_text_into_response(
+                response,
+                state.preferred_text(),
+                &state.output_items(),
+            ));
         }
         Some(event_type) if event_type.contains("image_generation_call") => {
             capture_responses_image_event(event, state);
@@ -1152,19 +1721,20 @@ fn apply_responses_stream_event(event: &Value, state: &mut ResponsesStreamState)
 fn capture_responses_output_item(item: &Value, state: &mut ResponsesStreamState) {
     if let Some(text) = extract_text_output(item) {
         state.done_text = text;
+        state.capture_output_item(item);
     } else if let Some(result) = item.get("result").and_then(Value::as_str) {
-        state.output.push(json!({
+        state.capture_output_item(&json!({
             "type": "image_generation_call",
             "result": result
         }));
     } else {
-        state.output.push(item.clone());
+        state.capture_output_item(item);
     }
 }
 
 fn capture_responses_image_event(event: &Value, state: &mut ResponsesStreamState) {
     if let Some(result) = event.get("result").and_then(Value::as_str) {
-        state.output.push(json!({
+        state.capture_output_item(&json!({
             "type": "image_generation_call",
             "result": result
         }));
@@ -1173,7 +1743,7 @@ fn capture_responses_image_event(event: &Value, state: &mut ResponsesStreamState
         .and_then(|item| item.get("result"))
         .and_then(Value::as_str)
     {
-        state.output.push(json!({
+        state.capture_output_item(&json!({
             "type": "image_generation_call",
             "result": result
         }));
@@ -1181,7 +1751,7 @@ fn capture_responses_image_event(event: &Value, state: &mut ResponsesStreamState
         != Some("response.image_generation_call.partial_image")
     {
         if let Some(item) = event.get("item") {
-            state.output.push(item.clone());
+            state.capture_output_item(item);
         }
     }
 }
@@ -1191,12 +1761,15 @@ fn merge_stream_text_into_response(
     output_text: &str,
     output: &[Value],
 ) -> Value {
-    if extract_text_output(&response).is_some() {
+    normalize_responses_output_items(&mut response);
+
+    let has_extractable_text = extract_text_output(&response).is_some();
+    let trimmed_output_text = output_text.trim();
+    if has_extractable_text && output.is_empty() {
         return response;
     }
 
-    let trimmed_output_text = output_text.trim();
-    if trimmed_output_text.is_empty() && output.is_empty() {
+    if !has_extractable_text && trimmed_output_text.is_empty() && output.is_empty() {
         return response;
     }
 
@@ -1208,7 +1781,7 @@ fn merge_stream_text_into_response(
             .unwrap_or(true);
 
     if let Some(response_object) = response.as_object_mut() {
-        if !trimmed_output_text.is_empty() {
+        if !has_extractable_text && !trimmed_output_text.is_empty() {
             response_object.insert(
                 "output_text".to_string(),
                 Value::String(trimmed_output_text.to_string()),
@@ -1221,6 +1794,143 @@ fn merge_stream_text_into_response(
     }
 
     response
+}
+
+fn normalize_responses_output_items(response: &mut Value) {
+    let Some(output) = response.get_mut("output").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    for item in output {
+        let mut item_state = ResponsesOutputItemState::from_value(item.clone());
+        if let Some(arguments) = item.get("arguments").and_then(Value::as_str) {
+            item_state.set_function_call_arguments(arguments);
+        }
+        *item = item_state.to_value();
+    }
+}
+
+fn merge_json_object(target: &mut Value, source: Value) {
+    let (Some(target_object), Some(source_object)) = (target.as_object_mut(), source.as_object())
+    else {
+        if target.is_null() {
+            *target = source;
+        }
+        return;
+    };
+
+    for (key, value) in source_object {
+        if value.is_null() {
+            continue;
+        }
+
+        match target_object.get_mut(key) {
+            Some(existing) if existing.is_object() && value.is_object() => {
+                merge_json_object(existing, value.clone());
+            }
+            Some(existing) if value_is_empty(existing) && !value_is_empty(value) => {
+                *existing = value.clone();
+            }
+            None => {
+                target_object.insert(key.clone(), value.clone());
+            }
+            _ => {}
+        }
+    }
+}
+
+fn value_is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(text) => text.trim().is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Object(object) => object.is_empty(),
+        _ => false,
+    }
+}
+
+fn set_string_field(item: &mut Value, field: &str, value: &str) {
+    if let Some(object) = item.as_object_mut() {
+        object.insert(field.to_string(), Value::String(value.to_string()));
+    }
+}
+
+fn append_reasoning_content(item: &mut Value, delta: &str) {
+    if let Some(object) = item.as_object_mut() {
+        if object.get("type").and_then(Value::as_str).is_none() {
+            object.insert("type".to_string(), Value::String("reasoning".to_string()));
+        }
+
+        let content = object
+            .entry("content".to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(content_items) = content.as_array_mut() {
+            content_items.push(json!({
+                "type": "reasoning_text",
+                "text": delta
+            }));
+        }
+    }
+}
+
+fn set_reasoning_summary_text(item: &mut Value, text: &str) {
+    if let Some(object) = item.as_object_mut() {
+        if object.get("type").and_then(Value::as_str).is_none() {
+            object.insert("type".to_string(), Value::String("reasoning".to_string()));
+        }
+
+        object.insert(
+            "summary".to_string(),
+            Value::Array(vec![json!({
+                "type": "summary_text",
+                "text": text
+            })]),
+        );
+    }
+}
+
+fn extract_reasoning_summary_text(item: &Value) -> Option<String> {
+    let summary = item.get("summary")?.as_array()?;
+    let text = summary
+        .iter()
+        .filter_map(|summary_item| {
+            summary_item
+                .get("text")
+                .or_else(|| summary_item.get("summary_text"))
+                .or_else(|| summary_item.get("content"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    (!text.is_empty()).then_some(text)
+}
+
+fn extract_response_error(response_json: &Value) -> Option<String> {
+    let status = response_json.get("status").and_then(Value::as_str);
+    let error = response_json
+        .get("error")
+        .filter(|error| !matches!(error, Value::Null));
+
+    if status != Some("failed") && error.is_none() {
+        return None;
+    }
+
+    let message = error
+        .and_then(|error| {
+            error
+                .get("message")
+                .or_else(|| error.get("error"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| response_json.get("message").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Provider returned a failed response");
+
+    Some(message.to_string())
 }
 
 fn build_prompt_analysis_input(request: &PromptAnalyzeRequest, grid_size: usize) -> String {
@@ -1350,41 +2060,6 @@ fn extract_text_content(content: &Value) -> Option<String> {
     }
 }
 
-fn has_image_generation_output(response_json: &Value) -> bool {
-    if response_json
-        .get("output")
-        .and_then(Value::as_array)
-        .map(|output| {
-            output.iter().any(|item| {
-                item.get("type").and_then(Value::as_str) == Some("image_generation_call")
-                    && item
-                        .get("result")
-                        .and_then(Value::as_str)
-                        .map(|value| !value.trim().is_empty())
-                        .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-    {
-        return true;
-    }
-
-    response_json
-        .get("data")
-        .and_then(Value::as_array)
-        .map(|images| {
-            images.iter().any(|image| {
-                image
-                    .get("url")
-                    .or_else(|| image.get("b64_json"))
-                    .and_then(Value::as_str)
-                    .map(|value| !value.trim().is_empty())
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
-}
-
 fn extract_image_base64(response_json: &Value) -> Option<String> {
     if let Some(output) = response_json.get("output").and_then(Value::as_array) {
         for item in output {
@@ -1419,11 +2094,19 @@ fn extract_image_base64(response_json: &Value) -> Option<String> {
         })
 }
 
-fn map_image_quality(quality: &str) -> &'static str {
-    match quality {
-        "high" => "high",
-        "standard" => "medium",
-        _ => "low",
+fn map_image_quality(image_quality: Option<&str>, project_quality: Option<&str>) -> &'static str {
+    match image_quality
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "auto")
+    {
+        Some("low") => "low",
+        Some("medium") => "medium",
+        Some("high") => "high",
+        _ => match project_quality.unwrap_or("draft") {
+            "high" => "high",
+            "standard" => "medium",
+            _ => "low",
+        },
     }
 }
 
@@ -1469,7 +2152,12 @@ fn map_legacy_image_size(aspect_ratio: &str) -> &'static str {
 }
 
 fn supports_flexible_image_size(model: &str, provider: &str) -> bool {
-    provider == "custom" || model.to_lowercase().contains("gpt-image-2")
+    let _ = provider;
+    model.to_lowercase().contains("gpt-image-2")
+}
+
+fn supports_partial_image_streaming(model: &str) -> bool {
+    model.to_lowercase().contains("gpt-image-2")
 }
 
 fn default_output_size() -> String {
@@ -1535,9 +2223,147 @@ data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}
     }
 
     #[test]
+    fn builds_responses_message_input_items() {
+        let request = UnifiedProviderRequest {
+            operation: ProviderOperation::TestTextModel,
+            provider: "openai".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: Some("test-text".to_string()),
+            prompt: None,
+            reasoning_enabled: false,
+            reasoning_effort: None,
+            response_verbosity: None,
+            stream_responses: false,
+            image: None,
+        };
+
+        let provider_request = build_provider_http_request(&request).unwrap();
+        let input = provider_request
+            .body
+            .as_ref()
+            .and_then(|body| body.get("input"))
+            .unwrap();
+
+        assert_eq!(
+            input,
+            &json!([
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Reply with exactly: OK"
+                        }
+                    ]
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn parses_stream_function_call_arguments_and_reasoning_summary() {
+        let response_text = r#"event: response.output_item.added
+data: {"type":"response.output_item.added","item":{"id":"call_1","type":"function_call","name":"lookup","arguments":""}}
+
+event: response.function_call_arguments.delta
+data: {"type":"response.function_call_arguments.delta","item_id":"call_1","delta":"{\"q\""}
+
+event: response.function_call_arguments.done
+data: {"type":"response.function_call_arguments.done","item_id":"call_1","arguments":"{\"q\":\"codex\"}"}
+
+event: response.reasoning_summary_text.delta
+data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"Checked"}
+
+event: response.reasoning_summary_text.done
+data: {"type":"response.reasoning_summary_text.done","item_id":"rs_1","text":"Checked docs"}
+
+event: response.completed
+data: {"type":"response.completed","response":{"id":"resp_test","output":[]}}
+"#;
+
+        let response_json = parse_responses_api_body(response_text).unwrap();
+        let output = response_json
+            .get("output")
+            .and_then(Value::as_array)
+            .unwrap();
+
+        assert_eq!(
+            output[0].get("type").and_then(Value::as_str),
+            Some("function_call")
+        );
+        assert_eq!(
+            output[0].get("arguments").and_then(Value::as_str),
+            Some("{\"q\":\"codex\"}")
+        );
+        assert_eq!(
+            output[1].get("type").and_then(Value::as_str),
+            Some("reasoning")
+        );
+        assert_eq!(
+            output[1]
+                .get("summary")
+                .and_then(Value::as_array)
+                .and_then(|summary| summary.first())
+                .and_then(|summary| summary.get("text"))
+                .and_then(Value::as_str),
+            Some("Checked docs")
+        );
+    }
+
+    #[test]
+    fn surfaces_responses_failed_event_error() {
+        let request = UnifiedProviderRequest {
+            operation: ProviderOperation::TestTextModel,
+            provider: "openai".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: Some("test-text".to_string()),
+            prompt: None,
+            reasoning_enabled: false,
+            reasoning_effort: None,
+            response_verbosity: None,
+            stream_responses: false,
+            image: None,
+        };
+        let response_text = r#"event: response.failed
+data: {"type":"response.failed","response":{"status":"failed","error":{"message":"bad request"}}}
+"#;
+
+        let error = match parse_provider_response(&request, response_text) {
+            Ok(_) => panic!("expected failed response to return an error"),
+            Err(error) => error,
+        };
+        assert_eq!(error, "bad request");
+    }
+
+    #[test]
+    fn ignores_null_error_on_completed_responses_response() {
+        let request = UnifiedProviderRequest {
+            operation: ProviderOperation::TestTextModel,
+            provider: "openai".to_string(),
+            base_url: "https://api.openai.com/v1".to_string(),
+            model: Some("test-text".to_string()),
+            prompt: None,
+            reasoning_enabled: false,
+            reasoning_effort: None,
+            response_verbosity: None,
+            stream_responses: false,
+            image: None,
+        };
+        let response_text = r#"{"status":"completed","error":null,"output":[{"type":"message","content":[{"type":"output_text","text":"OK"}]}]}"#;
+
+        let output = match parse_provider_response(&request, response_text).unwrap() {
+            UnifiedProviderResponse::Text(output) => output,
+            UnifiedProviderResponse::Image(_) => panic!("expected text response"),
+        };
+
+        assert_eq!(output, "OK");
+    }
+
+    #[test]
     fn prompt_analysis_runtime_parameters_do_not_enable_streaming() {
         let request = PromptAnalyzeRequest {
-            provider: "custom".to_string(),
+            provider: "openai-compatible".to_string(),
             base_url: "https://example.test/v1".to_string(),
             custom_headers: None,
             text_model: "test-text".to_string(),

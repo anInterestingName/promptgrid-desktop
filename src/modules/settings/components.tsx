@@ -16,7 +16,10 @@ import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { t, type Locale, type MessageKey } from "../../i18n";
 import type {
-  AppSettings,
+  ImageModelBackground,
+  ImageModelOutputFormat,
+  ImageModelQuality,
+  TextModelSettings,
   ModelOption,
   ReasoningEffort,
   ResponseVerbosity,
@@ -315,22 +318,24 @@ export function TestConnectionControl({
 
 type RuntimeParametersProps = {
   locale: Locale;
-  settings: AppSettings;
-  onChange: (settings: Partial<AppSettings>) => void;
+  runtime: TextModelSettings;
+  titleKey: MessageKey;
+  onChange: (runtime: Partial<TextModelSettings>) => void;
 };
 
 export function RuntimeParameters({
   locale,
-  settings,
+  runtime,
+  titleKey,
   onChange,
 }: RuntimeParametersProps) {
   return (
     <div className="settings-field wide-field runtime-parameters">
-      <span>{t(locale, "runtimeParameters")}</span>
+      <span>{t(locale, titleKey)}</span>
       <div className="runtime-parameter-grid">
         <label className="settings-check">
           <input
-            checked={settings.reasoningEnabled}
+            checked={runtime.reasoningEnabled}
             type="checkbox"
             onChange={(event) =>
               onChange({ reasoningEnabled: event.target.checked })
@@ -344,9 +349,9 @@ export function RuntimeParameters({
             {reasoningEffortOptions.map((option) => (
               <button
                 className={
-                  settings.reasoningEffort === option.value ? "active" : ""
+                  runtime.reasoningEffort === option.value ? "active" : ""
                 }
-                disabled={!settings.reasoningEnabled}
+                disabled={!runtime.reasoningEnabled}
                 key={option.value}
                 type="button"
                 onClick={() => onChange({ reasoningEffort: option.value })}
@@ -362,7 +367,7 @@ export function RuntimeParameters({
             {verbosityOptions.map((option) => (
               <button
                 className={
-                  settings.responseVerbosity === option.value ? "active" : ""
+                  runtime.responseVerbosity === option.value ? "active" : ""
                 }
                 key={option.value}
                 type="button"
@@ -375,13 +380,148 @@ export function RuntimeParameters({
         </div>
         <label className="settings-check">
           <input
-            checked={settings.streamResponses}
+            checked={runtime.streamResponses}
             type="checkbox"
             onChange={(event) =>
               onChange({ streamResponses: event.target.checked })
             }
           />
           <span>{t(locale, "streamResponses")}</span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
+const imageQualityOptions: Array<{
+  value: ImageModelQuality;
+  labelKey: MessageKey;
+}> = [
+  { value: "auto", labelKey: "imageParamAuto" },
+  { value: "low", labelKey: "reasoningLow" },
+  { value: "medium", labelKey: "reasoningMedium" },
+  { value: "high", labelKey: "reasoningHigh" },
+];
+
+const imageBackgroundOptions: Array<{
+  value: ImageModelBackground;
+  labelKey: MessageKey;
+}> = [
+  { value: "auto", labelKey: "imageParamAuto" },
+  { value: "transparent", labelKey: "imageBackgroundTransparent" },
+  { value: "opaque", labelKey: "imageBackgroundOpaque" },
+];
+
+const imageFormatOptions: Array<{
+  value: ImageModelOutputFormat;
+  labelKey: MessageKey;
+}> = [
+  { value: "png", labelKey: "imageFormatPng" },
+  { value: "jpeg", labelKey: "imageFormatJpeg" },
+  { value: "webp", labelKey: "imageFormatWebp" },
+];
+
+type ImageModelParametersProps = {
+  locale: Locale;
+  value: {
+    quality: ImageModelQuality;
+    background: ImageModelBackground;
+    outputFormat: ImageModelOutputFormat;
+    outputCompression: number;
+  };
+  onChange: (value: Partial<ImageModelParametersProps["value"]>) => void;
+};
+
+export function ImageModelParameters({
+  locale,
+  value,
+  onChange,
+}: ImageModelParametersProps) {
+  return (
+    <div className="settings-field wide-field image-model-parameters">
+      <span>{t(locale, "imageModelParameters")}</span>
+      <div className="runtime-parameter-grid image-parameter-grid">
+        <div className="settings-field">
+          <span>{t(locale, "imageQuality")}</span>
+          <div className="segmented-control settings-segmented runtime-segmented">
+            {imageQualityOptions.map((option) => (
+              <button
+                className={value.quality === option.value ? "active" : ""}
+                key={option.value}
+                type="button"
+                onClick={() => onChange({ quality: option.value })}
+              >
+                {t(locale, option.labelKey)}
+              </button>
+            ))}
+          </div>
+        </div>
+        <label className="settings-field">
+          <span>{t(locale, "imageBackground")}</span>
+          <select
+            className="settings-input"
+            value={value.background}
+            onChange={(event) =>
+              onChange({
+                background: event.target.value as ImageModelBackground,
+              })
+            }
+          >
+            {imageBackgroundOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {t(locale, option.labelKey)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="settings-field">
+          <span>{t(locale, "imageOutputFormat")}</span>
+          <select
+            className="settings-input"
+            value={value.outputFormat}
+            onChange={(event) =>
+              onChange({
+                outputFormat: event.target.value as ImageModelOutputFormat,
+              })
+            }
+          >
+            {imageFormatOptions.map((option) => (
+              <option key={option.value} value={option.value}>
+                {t(locale, option.labelKey)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="settings-field">
+          <span>{t(locale, "imageOutputCompression")}</span>
+          <div className="range-row">
+            <input
+              className="settings-range"
+              min={0}
+              max={100}
+              type="range"
+              value={value.outputCompression}
+              onChange={(event) =>
+                onChange({ outputCompression: Number(event.target.value) })
+              }
+            />
+            <input
+              className="number-input"
+              min={0}
+              max={100}
+              type="number"
+              value={value.outputCompression}
+              onChange={(event) => {
+                const compression = Number(event.target.value);
+                onChange({
+                  outputCompression: Math.min(
+                    100,
+                    Math.max(0, compression || 0),
+                  ),
+                });
+              }}
+            />
+          </div>
         </label>
       </div>
     </div>

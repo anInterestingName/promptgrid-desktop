@@ -1,6 +1,17 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { configureDebugLogging } from "./debugLogging";
-import type { AppSettings, Project } from "../types";
+import type {
+  AppSettings,
+  ModelCapability,
+  Project,
+  ProviderId,
+  ImageModelSettings,
+} from "../types";
+import {
+  getConfiguredImageProvider,
+  getConfiguredTextProvider,
+} from "../modules/settings/settingsDomain";
+import { getProviderSecretKey } from "./modelConfig";
 
 const DEV_SECRET_PREFIX = "promptgrid.dev.api-key";
 
@@ -14,7 +25,7 @@ export type PromptAnalysisResult = {
   directions: PromptDirection[];
 };
 
-export type AnalyzePromptRequest = ProviderRuntime & {
+export type AnalyzePromptRequest = TextProviderRuntime & {
   aspectRatio: string;
   gridSize: number;
   originalPrompt: string;
@@ -24,9 +35,13 @@ export type AnalyzePromptRequest = ProviderRuntime & {
   textModel: string;
 };
 
-export type GenerateImageRequest = ProviderRuntime & {
+export type GenerateImageRequest = ImageProviderRuntime & {
   aspectRatio: string;
+  imageBackground: ImageModelSettings["background"];
   imageModel: string;
+  imageOutputCompression: number;
+  imageOutputFormat: ImageModelSettings["outputFormat"];
+  imageQuality: ImageModelSettings["quality"];
   outputSize: string;
   prompt: string;
   quality: string;
@@ -37,30 +52,43 @@ export type GeneratedImage = {
 };
 
 type ProviderRuntime = {
+  channel: ModelCapability;
   baseUrl: string;
   customHeaders?: string;
-  provider: string;
-  reasoningEnabled: boolean;
-  reasoningEffort: string;
+  provider: ProviderId;
   responseVerbosity: string;
-  streamResponses: boolean;
   debugLoggingEnabled: boolean;
   debugLogRetentionDays: number;
+};
+
+type TextProviderRuntime = ProviderRuntime & {
+  channel: "text";
+  reasoningEnabled: boolean;
+  reasoningEffort: string;
+  streamResponses: boolean;
+};
+
+type ImageProviderRuntime = ProviderRuntime & {
+  channel: "image";
+  reasoningEnabled: boolean;
+  reasoningEffort: string;
+  streamResponses: boolean;
 };
 
 export async function analyzePromptDirections(
   project: Project,
   settings: AppSettings,
 ): Promise<PromptAnalysisResult> {
+  const textProvider = getConfiguredTextProvider(settings);
   const request = {
-    ...buildProviderRuntime(settings),
+    ...buildTextProviderRuntime(settings),
     aspectRatio: project.aspectRatio,
     gridSize: project.gridSize,
     originalPrompt: project.originalPrompt,
     outputSize: project.outputSize,
     quality: project.quality,
     style: project.style,
-    textModel: getConfiguredTextModel(settings),
+    textModel: textProvider.model,
   } satisfies AnalyzePromptRequest;
 
   await ensureDebugLoggingConfigured(request);
@@ -77,10 +105,15 @@ export async function generatePromptImage(
   project: Project,
   settings: AppSettings,
 ): Promise<GeneratedImage> {
+  const imageProvider = getConfiguredImageProvider(settings);
   const request = {
-    ...buildProviderRuntime(settings),
+    ...buildImageProviderRuntime(settings),
     aspectRatio: project.aspectRatio,
-    imageModel: getConfiguredImageModel(settings),
+    imageBackground: imageProvider.modelConfig.background,
+    imageModel: imageProvider.model,
+    imageOutputCompression: imageProvider.modelConfig.outputCompression,
+    imageOutputFormat: imageProvider.modelConfig.outputFormat,
+    imageQuality: imageProvider.modelConfig.quality,
     outputSize: getSupportedOutputSize(project.outputSize, settings),
     prompt,
     quality: project.quality,
@@ -102,35 +135,36 @@ async function ensureDebugLoggingConfigured(request: ProviderRuntime) {
   });
 }
 
-function buildProviderRuntime(settings: AppSettings): ProviderRuntime {
-  const provider = settings.apiProvider;
-
+function buildTextProviderRuntime(settings: AppSettings): TextProviderRuntime {
+  const route = getConfiguredTextProvider(settings);
   return {
-    provider,
-    baseUrl:
-      provider === "openai"
-        ? settings.openAiBaseUrl
-        : settings.customBaseUrl ?? "",
-    customHeaders: provider === "custom" ? settings.customHeaders : undefined,
-    reasoningEnabled: settings.reasoningEnabled,
-    reasoningEffort: settings.reasoningEffort,
-    responseVerbosity: settings.responseVerbosity,
-    streamResponses: settings.streamResponses,
+    channel: "text",
+    provider: route.providerId,
+    baseUrl: route.baseUrl,
+    customHeaders: route.customHeaders,
+    reasoningEnabled: route.modelConfig.reasoningEnabled,
+    reasoningEffort: route.modelConfig.reasoningEffort,
+    responseVerbosity: route.modelConfig.responseVerbosity,
+    streamResponses: route.modelConfig.streamResponses,
     debugLoggingEnabled: settings.debugLoggingEnabled,
     debugLogRetentionDays: settings.debugLogRetentionDays,
   };
 }
 
-function getConfiguredTextModel(settings: AppSettings) {
-  return settings.apiProvider === "openai"
-    ? settings.textModel
-    : settings.customTextModel ?? "";
-}
-
-function getConfiguredImageModel(settings: AppSettings) {
-  return settings.apiProvider === "openai"
-    ? settings.imageModel
-    : settings.customImageModel ?? "";
+function buildImageProviderRuntime(settings: AppSettings): ImageProviderRuntime {
+  const route = getConfiguredImageProvider(settings);
+  return {
+    channel: "image",
+    provider: route.providerId,
+    baseUrl: route.baseUrl,
+    customHeaders: route.customHeaders,
+    reasoningEnabled: route.modelConfig.reasoningEnabled,
+    reasoningEffort: route.modelConfig.reasoningEffort,
+    responseVerbosity: route.modelConfig.responseVerbosity,
+    streamResponses: route.modelConfig.streamResponses,
+    debugLoggingEnabled: settings.debugLoggingEnabled,
+    debugLogRetentionDays: settings.debugLogRetentionDays,
+  };
 }
 
 function getSupportedOutputSize(outputSize: string, settings: AppSettings) {
@@ -138,8 +172,9 @@ function getSupportedOutputSize(outputSize: string, settings: AppSettings) {
     return outputSize;
   }
 
-  const imageModel = getConfiguredImageModel(settings).toLowerCase();
-  if (settings.apiProvider === "custom" || imageModel.includes("gpt-image-2")) {
+  const imageProvider = getConfiguredImageProvider(settings);
+  const imageModel = imageProvider.model.toLowerCase();
+  if (imageModel.includes("gpt-image-2")) {
     return outputSize;
   }
 
@@ -151,7 +186,7 @@ async function requestDevAiProxy<ResponseBody>(
   payload: AnalyzePromptRequest | GenerateImageRequest,
 ): Promise<ResponseBody> {
   const apiKey = window.sessionStorage.getItem(
-    `${DEV_SECRET_PREFIX}.${payload.provider}`,
+    `${DEV_SECRET_PREFIX}.${getProviderSecretKey(payload.provider)}`,
   );
   if (!apiKey) {
     throw new Error("API key is not saved for this provider");

@@ -1,8 +1,9 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { configureDebugLogging } from "./debugLogging";
 import type {
-  ApiProvider,
+  ModelCapability,
   ModelOption,
+  ProviderId,
   ReasoningEffort,
   ResponseVerbosity,
 } from "../types";
@@ -10,7 +11,8 @@ import type {
 const DEV_SECRET_PREFIX = "promptgrid.dev.api-key";
 
 export type ModelFetchRequest = {
-  provider: ApiProvider;
+  channel: ModelCapability;
+  provider: ProviderId;
   baseUrl: string;
   customHeaders?: string;
   debugLoggingEnabled?: boolean;
@@ -32,11 +34,14 @@ export type ModelTestResult = {
 };
 
 export async function saveProviderApiKey(
-  provider: ApiProvider,
+  provider: ProviderId,
   apiKey: string,
 ): Promise<boolean> {
   if (isTauri()) {
-    return invoke<boolean>("save_provider_api_key", { provider, apiKey });
+    return invoke<boolean>("save_provider_api_key", {
+      provider,
+      apiKey,
+    });
   }
 
   const trimmedKey = apiKey.trim();
@@ -49,7 +54,7 @@ export async function saveProviderApiKey(
 }
 
 export async function clearProviderApiKey(
-  provider: ApiProvider,
+  provider: ProviderId,
 ): Promise<boolean> {
   if (isTauri()) {
     return invoke<boolean>("clear_provider_api_key", { provider });
@@ -113,8 +118,12 @@ export async function testProviderConnection(
   });
 }
 
-function getDevSecretKey(provider: ApiProvider) {
-  return `${DEV_SECRET_PREFIX}.${provider}`;
+export function getProviderSecretKey(provider: ProviderId) {
+  return provider;
+}
+
+function getDevSecretKey(provider: ProviderId) {
+  return `${DEV_SECRET_PREFIX}.${getProviderSecretKey(provider)}`;
 }
 
 async function ensureDebugLoggingConfigured(request: ModelFetchRequest) {

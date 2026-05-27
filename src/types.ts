@@ -6,7 +6,45 @@ export type Quality = "draft" | "standard" | "high";
 
 export type OutputSize = "standard" | "large" | "2k" | "4k";
 
-export type ApiProvider = "openai" | "custom";
+export type ProviderId = "openai" | "deepseek" | "openai-compatible";
+
+export type ModelCapability = "text" | "image";
+
+export type ImageModelQuality = "auto" | "low" | "medium" | "high";
+
+export type ImageModelBackground = "auto" | "transparent" | "opaque";
+
+export type ImageModelOutputFormat = "png" | "jpeg" | "webp";
+
+export type TextModelSettings = {
+  model: string;
+  reasoningEnabled: boolean;
+  reasoningEffort: ReasoningEffort;
+  responseVerbosity: ResponseVerbosity;
+  streamResponses: boolean;
+};
+
+export type ImageModelSettings = TextModelSettings & {
+  quality: ImageModelQuality;
+  background: ImageModelBackground;
+  outputFormat: ImageModelOutputFormat;
+  outputCompression: number;
+};
+
+export type ProviderConfig = {
+  enabled: boolean;
+  baseUrl: string;
+  apiKeySaved: boolean;
+  customHeaders?: string;
+  textModel: TextModelSettings;
+  imageModel: ImageModelSettings;
+};
+
+export type ActiveModelRoute = {
+  providerId: ProviderId;
+};
+
+export type ActiveModelSelection = Record<ModelCapability, ActiveModelRoute>;
 
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
@@ -94,21 +132,8 @@ export type ImageTask = {
 };
 
 export type AppSettings = {
-  apiProvider: ApiProvider;
-  textModel: string;
-  imageModel: string;
-  openAiBaseUrl: string;
-  openAiApiKeySaved: boolean;
-  customProviderName?: string;
-  customBaseUrl?: string;
-  customApiKeySaved: boolean;
-  customTextModel?: string;
-  customImageModel?: string;
-  customHeaders?: string;
-  reasoningEnabled: boolean;
-  reasoningEffort: ReasoningEffort;
-  responseVerbosity: ResponseVerbosity;
-  streamResponses: boolean;
+  providers: Record<ProviderId, ProviderConfig>;
+  activeModelSelection: ActiveModelSelection;
   debugLoggingEnabled: boolean;
   debugLogRetentionDays: number;
   maxConcurrency: number;

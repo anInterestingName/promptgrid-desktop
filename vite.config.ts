@@ -4,10 +4,11 @@ import { join } from "node:path";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import {
-  extractResponsesImageBase64,
-  extractResponsesText,
-  hasResponsesImageOutput,
-} from "./src/devProviderResponses";
+  buildProviderHeaders,
+  getProviderCompatibilityAdapter,
+  type ProviderHttpRequest,
+  type UnifiedProviderRequest,
+} from "./src/providerCompatibility";
 
 const host = process.env.TAURI_DEV_HOST ?? "127.0.0.1";
 const debugLogDir = join(process.cwd(), ".promptgrid-debug-logs");
@@ -33,7 +34,11 @@ type DevProviderProxyRequest = {
   baseUrl?: string;
   customHeaders?: string;
   gridSize?: number;
+  imageBackground?: "auto" | "transparent" | "opaque";
   imageModel?: string;
+  imageOutputCompression?: number;
+  imageOutputFormat?: "png" | "jpeg" | "webp";
+  imageQuality?: "auto" | "low" | "medium" | "high";
   kind?: "text" | "image";
   model?: string;
   originalPrompt?: string;
@@ -49,15 +54,6 @@ type DevProviderProxyRequest = {
   textModel?: string;
   debugLoggingEnabled?: boolean;
   debugLogRetentionDays?: number;
-};
-
-type ProviderModel = {
-  id?: string;
-  owned_by?: string;
-};
-
-type ProviderModelsResponse = {
-  data?: ProviderModel[];
 };
 
 function devProviderProxy(): Plugin {
@@ -107,30 +103,21 @@ async function handleAnalyzePrompts(
   const body = await readJsonBody(request);
   const model = requireField(body.textModel, "Text model");
   const gridSize = Math.max(1, Math.min(25, Number(body.gridSize) || 9));
-  const providerRequestBody = withRuntimeParameters(
-    {
-      model,
-      input: buildPromptAnalysisInput(body, gridSize),
-    },
-    {
-      ...body,
-      streamResponses: false,
-    },
-  );
-  const requestUrl = buildResponsesUrl(requireField(body.baseUrl, "Base URL"));
+  const unifiedRequest = buildUnifiedProviderRequest(body, {
+    model,
+    operation: "analyzePromptDirections",
+    prompt: buildPromptAnalysisInput(body, gridSize),
+    streamResponses: false,
+  });
+  const providerAdapter = getProviderCompatibilityAdapter(body.provider);
+  const providerRequest = providerAdapter.buildRequest(unifiedRequest);
   const { providerResponse, responseText } = await fetchProviderWithDebugLog({
     debugConfig: getDebugLoggingConfig(body),
     operation: "analyze_prompt_directions",
     provider: body.provider,
     model,
-    method: "POST",
-    url: requestUrl,
-    requestBody: providerRequestBody,
-    fetchOptions: {
-      method: "POST",
-      headers: buildProviderHeaders(body),
-      body: JSON.stringify(providerRequestBody),
-    },
+    providerRequest,
+    fetchOptions: buildProviderFetchOptions(unifiedRequest, providerRequest),
   });
 
   if (!providerResponse.ok) {
@@ -141,7 +128,15 @@ async function handleAnalyzePrompts(
     );
   }
 
-  const output = extractResponsesText(responseText);
+  const unifiedResponse = providerAdapter.parseResponse(
+    unifiedRequest,
+    responseText,
+  );
+  if (unifiedResponse.kind !== "text") {
+    throw new Error("Prompt analysis returned an incompatible response");
+  }
+
+  const output = unifiedResponse.text;
   const analysis = parsePromptDirections(output, gridSize);
   sendJson(response, 200, analysis);
 }
@@ -152,37 +147,31 @@ async function handleGenerateImage(
 ) {
   const body = await readJsonBody(request);
   const model = requireField(body.imageModel, "Image model");
-  const providerRequestBody = withRuntimeParameters(
-    {
+  const unifiedRequest = buildUnifiedProviderRequest(body, {
+    image: {
+      aspectRatio: body.aspectRatio,
+      background: body.imageBackground,
+      compression: body.imageOutputCompression,
+      format: body.imageOutputFormat,
       model,
-      input: requireField(body.prompt, "Image prompt"),
-      tools: [
-        buildImageGenerationTool(body),
-      ],
-      tool_choice: {
-        type: "image_generation",
-      },
+      outputSize: body.outputSize,
+      projectQuality: body.quality,
+      quality: body.imageQuality,
     },
-    {
-      ...body,
-      reasoningEnabled: false,
-      streamResponses: true,
-    },
-  );
-  const requestUrl = buildResponsesUrl(requireField(body.baseUrl, "Base URL"));
+    model,
+    operation: "generatePromptImage",
+    prompt: body.prompt,
+    reasoningEnabled: false,
+  });
+  const providerAdapter = getProviderCompatibilityAdapter(body.provider);
+  const providerRequest = providerAdapter.buildRequest(unifiedRequest);
   const { providerResponse, responseText } = await fetchProviderWithDebugLog({
     debugConfig: getDebugLoggingConfig(body),
     operation: "generate_prompt_image",
     provider: body.provider,
     model,
-    method: "POST",
-    url: requestUrl,
-    requestBody: providerRequestBody,
-    fetchOptions: {
-      method: "POST",
-      headers: buildProviderHeaders(body),
-      body: JSON.stringify(providerRequestBody),
-    },
+    providerRequest,
+    fetchOptions: buildProviderFetchOptions(unifiedRequest, providerRequest),
   });
 
   if (!providerResponse.ok) {
@@ -193,33 +182,17 @@ async function handleGenerateImage(
     );
   }
 
-  const imageBase64 = extractResponsesImageBase64(responseText);
-  if (!imageBase64) {
-    throw new Error("Image model returned no image output");
+  const unifiedResponse = providerAdapter.parseResponse(
+    unifiedRequest,
+    responseText,
+  );
+  if (unifiedResponse.kind !== "image") {
+    throw new Error("Image generation returned an incompatible response");
   }
 
   sendJson(response, 200, {
-    imageDataUrl: `data:image/png;base64,${imageBase64}`,
+    imageDataUrl: `data:image/png;base64,${unifiedResponse.imageBase64}`,
   });
-}
-
-function buildImageGenerationTool(request: DevProviderProxyRequest) {
-  const tool: Record<string, unknown> = {
-    type: "image_generation",
-    quality: mapImageQuality(request.quality),
-    size: mapImageSize(
-      request.aspectRatio,
-      request.outputSize,
-      request.imageModel,
-      request.provider,
-    ),
-  };
-
-  if (request.provider === "openai") {
-    tool.partial_images = 1;
-  }
-
-  return tool;
 }
 
 async function handleProviderModels(
@@ -227,16 +200,17 @@ async function handleProviderModels(
   response: ServerResponse,
 ) {
   const body = await readJsonBody(request);
-  const requestUrl = buildModelsUrl(requireField(body.baseUrl, "Base URL"));
+  const unifiedRequest = buildUnifiedProviderRequest(body, {
+    operation: "fetchModels",
+  });
+  const providerAdapter = getProviderCompatibilityAdapter(body.provider);
+  const providerRequest = providerAdapter.buildRequest(unifiedRequest);
   const { providerResponse, responseText } = await fetchProviderWithDebugLog({
     debugConfig: getDebugLoggingConfig(body),
     operation: "fetch_provider_models",
     provider: body.provider,
-    method: "GET",
-    url: requestUrl,
-    fetchOptions: {
-      headers: buildProviderHeaders(body),
-    },
+    providerRequest,
+    fetchOptions: buildProviderFetchOptions(unifiedRequest, providerRequest),
   });
 
   if (!providerResponse.ok) {
@@ -247,22 +221,15 @@ async function handleProviderModels(
     );
   }
 
-  const modelList = JSON.parse(responseText) as ProviderModelsResponse;
-  const models = (modelList.data ?? [])
-    .filter((model): model is Required<Pick<ProviderModel, "id">> & ProviderModel =>
-      Boolean(model.id),
-    )
-    .map((model) => ({
-      id: model.id,
-      ownedBy: model.owned_by,
-    }))
-    .sort((left, right) => left.id.localeCompare(right.id))
-    .filter(
-      (model, index, allModels) =>
-        index === 0 || model.id !== allModels[index - 1]?.id,
-    );
+  const unifiedResponse = providerAdapter.parseResponse(
+    unifiedRequest,
+    responseText,
+  );
+  if (unifiedResponse.kind !== "models") {
+    throw new Error("Model list returned an incompatible response");
+  }
 
-  sendJson(response, 200, models);
+  sendJson(response, 200, unifiedResponse.models);
 }
 
 async function handleProviderTest(
@@ -283,27 +250,19 @@ async function handleTextModelTest(
   response: ServerResponse,
 ) {
   const model = requireField(body.model, "Text model");
-  const providerRequestBody = withRuntimeParameters(
-    {
-      model,
-      input: "Reply with exactly: OK",
-    },
-    body,
-  );
-  const requestUrl = buildResponsesUrl(requireField(body.baseUrl, "Base URL"));
+  const unifiedRequest = buildUnifiedProviderRequest(body, {
+    model,
+    operation: "testTextModel",
+  });
+  const providerAdapter = getProviderCompatibilityAdapter(body.provider);
+  const providerRequest = providerAdapter.buildRequest(unifiedRequest);
   const { providerResponse, responseText } = await fetchProviderWithDebugLog({
     debugConfig: getDebugLoggingConfig(body),
     operation: "test_text_model",
     provider: body.provider,
     model,
-    method: "POST",
-    url: requestUrl,
-    requestBody: providerRequestBody,
-    fetchOptions: {
-      method: "POST",
-      headers: buildProviderHeaders(body),
-      body: JSON.stringify(providerRequestBody),
-    },
+    providerRequest,
+    fetchOptions: buildProviderFetchOptions(unifiedRequest, providerRequest),
   });
 
   if (!providerResponse.ok) {
@@ -314,14 +273,17 @@ async function handleTextModelTest(
     );
   }
 
-  const output = extractResponsesText(responseText);
-  if (!output) {
-    throw new Error("Model returned an empty response");
+  const unifiedResponse = providerAdapter.parseResponse(
+    unifiedRequest,
+    responseText,
+  );
+  if (unifiedResponse.kind !== "text") {
+    throw new Error("Text model test returned an incompatible response");
   }
 
   sendJson(response, 200, {
     model,
-    output,
+    output: unifiedResponse.text,
   });
 }
 
@@ -330,36 +292,23 @@ async function handleImageModelTest(
   response: ServerResponse,
 ) {
   const model = requireField(body.model, "Image model");
-  const providerRequestBody = withRuntimeParameters(
-    {
+  const unifiedRequest = buildUnifiedProviderRequest(body, {
+    image: {
       model,
-      input:
-        "Generate a simple image of a small blue square on a white background.",
-      tools: [
-        {
-          type: "image_generation",
-        },
-      ],
-      tool_choice: {
-        type: "image_generation",
-      },
     },
-    { ...body, streamResponses: false },
-  );
-  const requestUrl = buildResponsesUrl(requireField(body.baseUrl, "Base URL"));
+    model,
+    operation: "testImageModel",
+    streamResponses: false,
+  });
+  const providerAdapter = getProviderCompatibilityAdapter(body.provider);
+  const providerRequest = providerAdapter.buildRequest(unifiedRequest);
   const { providerResponse, responseText } = await fetchProviderWithDebugLog({
     debugConfig: getDebugLoggingConfig(body),
     operation: "test_image_model",
     provider: body.provider,
     model,
-    method: "POST",
-    url: requestUrl,
-    requestBody: providerRequestBody,
-    fetchOptions: {
-      method: "POST",
-      headers: buildProviderHeaders(body),
-      body: JSON.stringify(providerRequestBody),
-    },
+    providerRequest,
+    fetchOptions: buildProviderFetchOptions(unifiedRequest, providerRequest),
   });
 
   if (!providerResponse.ok) {
@@ -370,37 +319,18 @@ async function handleImageModelTest(
     );
   }
 
-  if (!hasResponsesImageOutput(responseText)) {
-    throw new Error("Image model returned no image output");
+  const unifiedResponse = providerAdapter.parseResponse(
+    unifiedRequest,
+    responseText,
+  );
+  if (unifiedResponse.kind !== "image") {
+    throw new Error("Image model test returned an incompatible response");
   }
 
   sendJson(response, 200, {
     model,
     output: "Image output returned from Responses API",
   });
-}
-
-function withRuntimeParameters(
-  payload: Record<string, unknown>,
-  request: DevProviderProxyRequest,
-) {
-  if (request.reasoningEnabled) {
-    payload.reasoning = {
-      effort: request.reasoningEffort || "medium",
-    };
-  }
-
-  if (request.responseVerbosity && request.responseVerbosity !== "medium") {
-    payload.text = {
-      verbosity: request.responseVerbosity,
-    };
-  }
-
-  if (request.streamResponses) {
-    payload.stream = true;
-  }
-
-  return payload;
 }
 
 function buildPromptAnalysisInput(
@@ -480,148 +410,71 @@ function parseJsonFromText(output: string) {
   throw new Error("Prompt analysis did not return valid JSON");
 }
 
-function mapImageQuality(quality?: string) {
-  if (quality === "high") {
-    return "high";
-  }
-
-  if (quality === "standard") {
-    return "medium";
-  }
-
-  return "low";
+function buildUnifiedProviderRequest(
+  request: DevProviderProxyRequest,
+  update: Partial<UnifiedProviderRequest>,
+): UnifiedProviderRequest {
+  return {
+    apiKey: requireField(request.apiKey, "API key"),
+    baseUrl: request.baseUrl ?? "",
+    customHeaders: request.customHeaders,
+    provider: request.provider,
+    reasoningEnabled: request.reasoningEnabled,
+    reasoningEffort: request.reasoningEffort,
+    responseVerbosity: request.responseVerbosity,
+    streamResponses: request.streamResponses,
+    ...update,
+  } as UnifiedProviderRequest;
 }
 
-function mapImageSize(
-  aspectRatio?: string,
-  outputSize?: string,
-  model?: string,
-  provider?: string,
-) {
-  if (!supportsFlexibleImageSize(model, provider)) {
-    return mapLegacyImageSize(aspectRatio);
-  }
-
-  if (outputSize === "4k") {
-    if (aspectRatio === "9:16") {
-      return "2160x3840";
-    }
-
-    if (aspectRatio === "4:3") {
-      return "3264x2448";
-    }
-
-    if (aspectRatio === "1:1") {
-      return "2880x2880";
-    }
-
-    return "3840x2160";
-  }
-
-  if (outputSize === "2k") {
-    if (aspectRatio === "9:16") {
-      return "1152x2048";
-    }
-
-    if (aspectRatio === "4:3") {
-      return "2048x1536";
-    }
-
-    if (aspectRatio === "1:1") {
-      return "2048x2048";
-    }
-
-    return "2048x1152";
-  }
-
-  if (outputSize === "large") {
-    if (aspectRatio === "9:16") {
-      return "1088x1920";
-    }
-
-    if (aspectRatio === "4:3") {
-      return "1440x1088";
-    }
-
-    if (aspectRatio === "1:1") {
-      return "1536x1536";
-    }
-
-    return "1920x1088";
-  }
-
-  return mapLegacyImageSize(aspectRatio);
-}
-
-function mapLegacyImageSize(aspectRatio?: string) {
-  if (aspectRatio === "16:9" || aspectRatio === "4:3") {
-    return "1536x1024";
-  }
-
-  if (aspectRatio === "9:16") {
-    return "1024x1536";
-  }
-
-  return "1024x1024";
-}
-
-function supportsFlexibleImageSize(model?: string, provider?: string) {
-  return provider === "custom" || model?.toLowerCase().includes("gpt-image-2");
-}
-
-function buildProviderHeaders(request: DevProviderProxyRequest) {
-  const headers = new Headers({
-    authorization: `Bearer ${requireField(request.apiKey, "API key")}`,
-    "content-type": "application/json",
-  });
-
-  for (const [name, value] of Object.entries(
-    parseCustomHeaders(request.customHeaders),
-  )) {
-    headers.set(name, value);
-  }
-
-  return headers;
+function buildProviderFetchOptions(
+  unifiedRequest: UnifiedProviderRequest,
+  providerRequest: ProviderHttpRequest,
+): RequestInit {
+  return {
+    method: providerRequest.method,
+    headers: buildProviderHeaders(unifiedRequest),
+    body:
+      providerRequest.body === undefined
+        ? undefined
+        : JSON.stringify(providerRequest.body),
+  };
 }
 
 async function fetchProviderWithDebugLog({
   fetchOptions,
   debugConfig,
-  method,
   model,
   operation,
   provider,
-  requestBody,
-  url,
+  providerRequest,
 }: {
   debugConfig: DebugLoggingConfig;
   fetchOptions: RequestInit;
-  method: string;
   model?: string;
   operation: string;
   provider?: string;
-  requestBody?: unknown;
-  url: string;
+  providerRequest: ProviderHttpRequest;
 }) {
   const startedAt = Date.now();
 
   try {
-    const providerResponse = await fetch(url, fetchOptions);
+    const providerResponse = await fetch(providerRequest.url, fetchOptions);
     const responseText = await providerResponse.text();
     if (debugConfig.enabled) {
       await appendDebugLogEntry(
         {
           durationMs: Date.now() - startedAt,
-          method,
+          method: providerRequest.method,
           model,
           ok: providerResponse.ok,
           operation,
           provider,
-          request: requestBody ?? null,
+          request: providerRequest.body ?? null,
           response: responseTextToLogValue(responseText),
           status: providerResponse.status,
           timestampMs: Date.now(),
-          url,
+          url: providerRequest.url,
         },
         debugConfig.retentionDays,
       );
@@ -634,15 +487,15 @@ async function fetchProviderWithDebugLog({
         {
           durationMs: Date.now() - startedAt,
           error: getErrorMessage(error),
-          method,
+          method: providerRequest.method,
           model,
           ok: false,
           operation,
           provider,
-          request: requestBody ?? null,
+          request: providerRequest.body ?? null,
           response: null,
           timestampMs: Date.now(),
-          url,
+          url: providerRequest.url,
         },
         debugConfig.retentionDays,
       );
@@ -771,62 +624,6 @@ function truncateLogString(value: string) {
   return `${value.slice(0, maxLogStringLength)}\n[truncated ${
     value.length - maxLogStringLength
   } chars]`;
-}
-
-function parseCustomHeaders(rawHeaders?: string) {
-  const trimmedHeaders = rawHeaders?.trim();
-  if (!trimmedHeaders) {
-    return {};
-  }
-
-  const parsedHeaders = JSON.parse(trimmedHeaders) as unknown;
-  if (
-    !parsedHeaders ||
-    typeof parsedHeaders !== "object" ||
-    Array.isArray(parsedHeaders)
-  ) {
-    throw new Error("Extra headers must be a JSON object");
-  }
-
-  return Object.fromEntries(
-    Object.entries(parsedHeaders).map(([name, value]) => {
-      if (typeof value !== "string") {
-        throw new Error(`Header \`${name}\` must be a string`);
-      }
-
-      return [name, value];
-    }),
-  );
-}
-
-function buildModelsUrl(baseUrl: string) {
-  const trimmedUrl = baseUrl.trim().replace(/\/+$/, "");
-  if (trimmedUrl.endsWith("/models")) {
-    return trimmedUrl;
-  }
-
-  if (trimmedUrl.endsWith("/v1")) {
-    return `${trimmedUrl}/models`;
-  }
-
-  return `${trimmedUrl}/v1/models`;
-}
-
-function buildResponsesUrl(baseUrl: string) {
-  const trimmedUrl = baseUrl.trim().replace(/\/+$/, "");
-  if (trimmedUrl.endsWith("/responses")) {
-    return trimmedUrl;
-  }
-
-  if (trimmedUrl.endsWith("/v1/models")) {
-    return `${trimmedUrl.slice(0, -"/models".length)}/responses`;
-  }
-
-  if (trimmedUrl.endsWith("/v1")) {
-    return `${trimmedUrl}/responses`;
-  }
-
-  return `${trimmedUrl}/v1/responses`;
 }
 
 async function readJsonBody(request: IncomingMessage) {

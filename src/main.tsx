@@ -8,6 +8,14 @@ if (isTauri()) {
   document.addEventListener(
     "contextmenu",
     (event) => {
+      const target =
+        event.target instanceof Element
+          ? event.target
+          : document.elementFromPoint(event.clientX, event.clientY);
+      if (target?.closest("[data-grid-image-task-id]")) {
+        return;
+      }
+
       event.preventDefault();
     },
     { capture: true },

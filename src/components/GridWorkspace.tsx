@@ -1,17 +1,40 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import {
+  Check,
+  Copy,
+  FolderOpen,
   Maximize2,
   RefreshCw,
   RotateCcw,
   SplitSquareVertical,
   X,
 } from "lucide-react";
-import { useMemo, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+} from "react";
+import { ContextMenu } from "./ContextMenu";
+import {
+  getContextMenuPosition,
+  type ContextMenuItem,
+} from "./contextMenuUtils";
 import { gridSizeOptions } from "../data/mockProject";
 import { statusLabels, t, type Locale } from "../i18n";
+import {
+  copyImageFile,
+  openImageInFileManager,
+} from "../services/localPersistence";
+import { getErrorMessage } from "../shared/utils/error";
 import { usePromptGridStore } from "../state/usePromptGridStore";
 import type { GridCell, GridSize } from "../types";
+
+const cellContextMenuWidth = 196;
+const cellContextMenuHeight = 92;
+const cellContextMenuGap = 8;
 
 export function GridWorkspace() {
   const locale = usePromptGridStore((state) => state.locale);
@@ -32,18 +55,166 @@ export function GridWorkspace() {
   const regenerateTask = usePromptGridStore((state) => state.regenerateTask);
   const retryTask = usePromptGridStore((state) => state.retryTask);
   const expandFromTask = usePromptGridStore((state) => state.expandFromTask);
+  const [cellContextMenu, setCellContextMenu] = useState<{
+    taskId: string;
+    x: number;
+    y: number;
+  }>();
+  const [imageActionMessage, setImageActionMessage] = useState<{
+    taskId: string;
+    tone: "success" | "error";
+    message: string;
+  }>();
 
   const previewTaskValue = useMemo(
     () => tasks.find((task) => task.id === previewTaskId),
     [previewTaskId, tasks],
+  );
+  const contextMenuTask = useMemo(
+    () => tasks.find((task) => task.id === cellContextMenu?.taskId),
+    [cellContextMenu?.taskId, tasks],
   );
   const imageGridStyle = {
     "--grid-columns": getGridColumns(project.gridSize),
   } as CSSProperties;
   const isConfigurationLocked = Boolean(conversation.configurationLocked);
 
+  useEffect(() => {
+    if (!imageActionMessage) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setImageActionMessage((current) =>
+        current?.taskId === imageActionMessage.taskId ? undefined : current,
+      );
+    }, 3200);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [imageActionMessage]);
+
+  const openContextMenuForTask = useCallback(
+    (task: GridCell, x: number, y: number) => {
+      selectTask(task.id);
+      if (!canUseImageFileActions(task)) {
+        setImageActionMessage({
+          taskId: task.id,
+          tone: "error",
+          message: t(locale, "imageFileUnavailable"),
+        });
+      }
+
+      setCellContextMenu({
+        taskId: task.id,
+        ...getContextMenuPosition({
+          preferredX: x,
+          preferredY: y,
+          width: cellContextMenuWidth,
+          height: cellContextMenuHeight,
+          gap: cellContextMenuGap,
+        }),
+      });
+    },
+    [locale, selectTask],
+  );
+
+  useEffect(() => {
+    function getGridImageTarget(event: MouseEvent | PointerEvent) {
+      const eventTarget =
+        event.target instanceof Element
+          ? event.target
+          : document.elementFromPoint(event.clientX, event.clientY);
+      const target = eventTarget?.closest<HTMLElement>(
+        "[data-grid-image-task-id]",
+      );
+      if (!target) {
+        return undefined;
+      }
+
+      return target.dataset.gridImageTaskId;
+    }
+
+    function openGridImageContextMenu(event: MouseEvent | PointerEvent) {
+      if (
+        event.type !== "contextmenu" &&
+        event.type !== "auxclick" &&
+        event.button !== 2
+      ) {
+        return;
+      }
+
+      const taskId = getGridImageTarget(event);
+      const task = taskId
+        ? tasks.find((candidate) => candidate.id === taskId)
+        : undefined;
+      if (!task) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      openContextMenuForTask(task, event.clientX, event.clientY);
+    }
+
+    document.addEventListener("contextmenu", openGridImageContextMenu, true);
+    document.addEventListener("pointerdown", openGridImageContextMenu, true);
+    document.addEventListener("mousedown", openGridImageContextMenu, true);
+    document.addEventListener("auxclick", openGridImageContextMenu, true);
+    return () => {
+      document.removeEventListener("contextmenu", openGridImageContextMenu, true);
+      document.removeEventListener("pointerdown", openGridImageContextMenu, true);
+      document.removeEventListener("mousedown", openGridImageContextMenu, true);
+      document.removeEventListener("auxclick", openGridImageContextMenu, true);
+    };
+  }, [openContextMenuForTask, tasks]);
+
+  async function handleOpenImageLocation(task: GridCell) {
+    setCellContextMenu(undefined);
+    if (!task.imagePath) {
+      return;
+    }
+
+    try {
+      await openImageInFileManager(task.imagePath);
+      setImageActionMessage(undefined);
+    } catch (error) {
+      setImageActionMessage({
+        taskId: task.id,
+        tone: "error",
+        message: getImageActionErrorMessage(locale, error, "open"),
+      });
+      console.error("Could not open image location", error);
+    }
+  }
+
+  async function handleCopyImage(task: GridCell) {
+    setCellContextMenu(undefined);
+    if (!task.imagePath) {
+      return;
+    }
+
+    try {
+      await copyImageFile(task.imagePath);
+      setImageActionMessage({
+        taskId: task.id,
+        tone: "success",
+        message: t(locale, "imageFileCopied"),
+      });
+    } catch (error) {
+      setImageActionMessage({
+        taskId: task.id,
+        tone: "error",
+        message: getImageActionErrorMessage(locale, error, "copy"),
+      });
+      console.error("Could not copy image file", error);
+    }
+  }
+
   return (
-    <section className="grid-workspace" aria-label={t(locale, "imageGridAria")}>
+    <section
+      className="grid-workspace"
+      aria-label={t(locale, "imageGridAria")}
+    >
       <div className="workspace-header">
         <div>
           <p className="eyebrow">
@@ -85,9 +256,28 @@ export function GridWorkspace() {
             onRetry={() => retryTask(task.id)}
             onSelect={() => selectTask(task.id)}
             onUpdatePrompt={(prompt) => updateTaskPrompt(task.id, prompt)}
+            statusMessage={
+              imageActionMessage?.taskId === task.id ? imageActionMessage : undefined
+            }
           />
         ))}
       </div>
+
+      {contextMenuTask && cellContextMenu
+        ? (
+            <ContextMenu
+              ariaLabel={t(locale, "imageActions")}
+              items={getImageContextMenuItems({
+                task: contextMenuTask,
+                locale,
+                onCopyImage: () => void handleCopyImage(contextMenuTask),
+                onOpenLocation: () => void handleOpenImageLocation(contextMenuTask),
+              })}
+              position={cellContextMenu}
+              onClose={() => setCellContextMenu(undefined)}
+            />
+          )
+        : null}
 
       <Dialog.Root
         open={Boolean(previewTaskValue)}
@@ -107,7 +297,7 @@ export function GridWorkspace() {
                   : t(locale, "preview")}
               </Dialog.Title>
               <Dialog.Close
-                className="icon-button"
+                className="icon-button preview-close-button"
                 title={t(locale, "closePreview")}
               >
                 <X size={18} aria-hidden="true" />
@@ -136,6 +326,10 @@ type GridCellCardProps = {
   onRetry: () => void;
   onExpand: () => void;
   onUpdatePrompt: (prompt: string) => void;
+  statusMessage?: {
+    tone: "success" | "error";
+    message: string;
+  };
 };
 
 function GridCellCard({
@@ -148,6 +342,7 @@ function GridCellCard({
   onRetry,
   onExpand,
   onUpdatePrompt,
+  statusMessage,
 }: GridCellCardProps) {
   const canPreview = task.status === "completed";
   const directionTitle = getTaskDirectionTitle(task, locale);
@@ -155,9 +350,10 @@ function GridCellCard({
   return (
     <article
       className={isSelected ? "grid-cell selected" : "grid-cell"}
+      data-task-id={task.id}
       onClick={onSelect}
     >
-      <div className="cell-image-wrap">
+      <div className="cell-image-wrap" data-grid-image-task-id={task.id}>
         <MockImage task={task} />
         {task.status !== "completed" ? (
           <div className={`status-scrim status-${task.status}`}>
@@ -182,12 +378,24 @@ function GridCellCard({
           value={task.prompt}
           onChange={(event) => onUpdatePrompt(event.target.value)}
           onClick={(event) => event.stopPropagation()}
+          onContextMenu={(event) => event.stopPropagation()}
         />
         {task.errorMessage ? (
           <p className="cell-error">
             {task.errorMessage === "Mock provider timeout"
               ? t(locale, "mockProviderTimeout")
               : task.errorMessage}
+          </p>
+        ) : null}
+        {statusMessage ? (
+          <p
+            className={`cell-file-status ${statusMessage.tone}`}
+            role={statusMessage.tone === "error" ? "alert" : "status"}
+          >
+            {statusMessage.tone === "success" ? (
+              <Check size={14} aria-hidden="true" />
+            ) : null}
+            <span>{statusMessage.message}</span>
           </p>
         ) : null}
       </div>
@@ -202,6 +410,7 @@ function GridCellCard({
               onPreview();
             }
           }}
+          onContextMenu={(event) => event.stopPropagation()}
           disabled={!canPreview}
         >
           <Maximize2 size={16} aria-hidden="true" />
@@ -221,6 +430,7 @@ function GridCellCard({
             }
             onRegenerate();
           }}
+          onContextMenu={(event) => event.stopPropagation()}
         >
           {task.status === "failed" ? (
             <RotateCcw size={16} aria-hidden="true" />
@@ -235,12 +445,44 @@ function GridCellCard({
             event.stopPropagation();
             onExpand();
           }}
+          onContextMenu={(event) => event.stopPropagation()}
         >
           <SplitSquareVertical size={16} aria-hidden="true" />
         </button>
       </footer>
     </article>
   );
+}
+
+function getImageContextMenuItems({
+  task,
+  locale,
+  onOpenLocation,
+  onCopyImage,
+}: {
+  task: GridCell;
+  locale: Locale;
+  onOpenLocation: () => void;
+  onCopyImage: () => void;
+}): ContextMenuItem[] {
+  const canUseFileActions = canUseImageFileActions(task);
+
+  return [
+    {
+      key: "open-location",
+      label: t(locale, "openImageInFileManager"),
+      icon: <FolderOpen size={15} aria-hidden="true" />,
+      disabled: !canUseFileActions,
+      onSelect: onOpenLocation,
+    },
+    {
+      key: "copy-image",
+      label: t(locale, "copyImage"),
+      icon: <Copy size={15} aria-hidden="true" />,
+      disabled: !canUseFileActions,
+      onSelect: onCopyImage,
+    },
+  ];
 }
 
 function getTaskDirectionTitle(task: GridCell, locale: Locale) {
@@ -261,6 +503,38 @@ function getGridColumns(gridSize: GridSize) {
 
 function formatGridEyebrow(gridSize: GridSize, locale: Locale) {
   return locale === "zh" ? `${gridSize} 宫格` : `${gridSize}-Cell Grid`;
+}
+
+function canUseImageFileActions(task: GridCell) {
+  return (
+    task.status === "completed" &&
+    Boolean(task.imagePath?.trim()) &&
+    !task.imagePath?.startsWith("data:image/")
+  );
+}
+
+function getImageActionErrorMessage(
+  locale: Locale,
+  error: unknown,
+  action: "open" | "copy",
+) {
+  const message = getErrorMessage(error);
+  if (message.includes("desktop app")) {
+    return t(locale, "imageFileDesktopOnly");
+  }
+
+  if (message.includes("not found") || message.includes("not a file")) {
+    return t(locale, "imageFileMissing");
+  }
+
+  if (message.includes("local source file")) {
+    return t(locale, "imageFileUnavailable");
+  }
+
+  return `${t(
+    locale,
+    action === "open" ? "openImageFileError" : "copyImageFileError",
+  )}: ${message}`;
 }
 
 function MockImage({

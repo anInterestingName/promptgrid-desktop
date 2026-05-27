@@ -5,11 +5,11 @@ import {
   Folder,
   Link2,
   Save,
-  SlidersHorizontal,
+  Server,
 } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { aspectRatioOptions, gridSizeOptions } from "../../data/mockProject";
-import { t, type Locale, type MessageKey } from "../../i18n";
+import { t, type MessageKey } from "../../i18n";
 import {
   clearProviderApiKey,
   fetchProviderModels,
@@ -26,15 +26,17 @@ import {
 import { usePromptGridStore } from "../../state/usePromptGridStore";
 import { getErrorMessage } from "../../shared/utils/error";
 import type {
-  ApiProvider,
   AppSettings,
   AspectRatio,
   GridSize,
   ModelOption,
+  ProviderConfig,
+  ProviderId,
 } from "../../types";
 import {
   FetchModelsControl,
   FieldLabel,
+  ImageModelParameters,
   ModelField,
   RuntimeParameters,
   SecretField,
@@ -47,6 +49,10 @@ import {
   getModelTestErrorMessage,
   getSuggestedModelId,
 } from "./modelSettingsUtils";
+import {
+  getProviderAdapter,
+  visibleProviderAdapterList,
+} from "./providerAdapters";
 import type {
   ModelFetchStatus,
   ModelTestKind,
@@ -55,14 +61,6 @@ import type {
   SettingsNoticeModel as ModelNotice,
   StorageActionStatus,
 } from "./types";
-
-const providerOptions: Array<{
-  value: ApiProvider;
-  labelKey: MessageKey;
-}> = [
-  { value: "openai", labelKey: "providerOpenAI" },
-  { value: "custom", labelKey: "providerCustom" },
-];
 
 const storageStatusKeys = {
   idle: "saveStateIdle",
@@ -77,23 +75,24 @@ export function SettingsWorkspace() {
   const settings = usePromptGridStore((state) => state.settings);
   const storageStatus = usePromptGridStore((state) => state.storageStatus);
   const updateSettings = usePromptGridStore((state) => state.updateSettings);
-  const [showOpenAiKey, setShowOpenAiKey] = useState(false);
-  const [showCustomKey, setShowCustomKey] = useState(false);
-  const [openAiApiKeyDraft, setOpenAiApiKeyDraft] = useState("");
-  const [customApiKeyDraft, setCustomApiKeyDraft] = useState("");
+  const [apiKeyDrafts, setApiKeyDrafts] = useState<Record<string, string>>({});
+  const [visibleApiKeys, setVisibleApiKeys] = useState<Record<string, boolean>>(
+    {},
+  );
   const [secretActionProvider, setSecretActionProvider] =
-    useState<ApiProvider | null>(null);
+    useState<ProviderId | null>(null);
   const [secretError, setSecretError] = useState<{
-    provider: ApiProvider;
+    provider: ProviderId;
     message: string;
   } | null>(null);
-  const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
-  const [modelOptionsProvider, setModelOptionsProvider] =
-    useState<ApiProvider | null>(null);
-  const [modelFetchStatus, setModelFetchStatus] =
-    useState<ModelFetchStatus>("idle");
+  const [modelOptionsByProvider, setModelOptionsByProvider] = useState<
+    Partial<Record<ProviderId, ModelOption[]>>
+  >({});
+  const [modelFetchStatuses, setModelFetchStatuses] = useState<
+    Partial<Record<ProviderId, ModelFetchStatus>>
+  >({});
   const [modelTestStatuses, setModelTestStatuses] =
-    useState<ModelTestStatuses>({ text: "idle", image: "idle" });
+    useState<ModelTestStatuses>({});
   const [modelNotice, setModelNotice] = useState<ModelNotice | null>(null);
   const [storageInfo, setStorageInfo] = useState<StorageInfo | null>(null);
   const [storageDirectoryDraft, setStorageDirectoryDraft] = useState("");
@@ -103,6 +102,9 @@ export function SettingsWorkspace() {
   const [debugLogStatus, setDebugLogStatus] =
     useState<StorageActionStatus>("idle");
   const [debugLogNotice, setDebugLogNotice] = useState<ModelNotice | null>(null);
+  const [selectedProviderId, setSelectedProviderId] = useState<ProviderId>(
+    settings.activeModelSelection.text.providerId,
+  );
 
   const updateSetting = <Key extends keyof AppSettings>(
     key: Key,
@@ -111,26 +113,48 @@ export function SettingsWorkspace() {
     updateSettings({ [key]: value });
   };
 
-  const buildModelFetchRequest = useCallback(
-    (provider: ApiProvider) => ({
-      provider,
-      baseUrl:
-        provider === "openai"
-          ? settings.openAiBaseUrl
-          : settings.customBaseUrl ?? "",
-      customHeaders:
-        provider === "custom" ? settings.customHeaders : undefined,
-      debugLoggingEnabled: settings.debugLoggingEnabled,
-      debugLogRetentionDays: settings.debugLogRetentionDays,
-    }),
-    [
-      settings.customBaseUrl,
-      settings.customHeaders,
-      settings.debugLogRetentionDays,
-      settings.debugLoggingEnabled,
-      settings.openAiBaseUrl,
-    ],
-  );
+  const updateProvider = (
+    providerId: ProviderId,
+    update: Partial<ProviderConfig>,
+  ) => {
+    updateSettings({
+      providers: {
+        ...settings.providers,
+        [providerId]: {
+          ...settings.providers[providerId],
+          ...update,
+        },
+      },
+    });
+  };
+
+  const updateProviderTextModel = (
+    providerId: ProviderId,
+    update: Partial<ProviderConfig["textModel"]>,
+  ) => {
+    const provider = settings.providers[providerId];
+    updateProvider(providerId, {
+      textModel: {
+        ...provider.textModel,
+        ...update,
+      },
+    });
+    setModelTestStatus(`${providerId}:text`, "idle");
+  };
+
+  const updateProviderImageModel = (
+    providerId: ProviderId,
+    update: Partial<ProviderConfig["imageModel"]>,
+  ) => {
+    const provider = settings.providers[providerId];
+    updateProvider(providerId, {
+      imageModel: {
+        ...provider.imageModel,
+        ...update,
+      },
+    });
+    setModelTestStatus(`${providerId}:image`, "idle");
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -154,6 +178,30 @@ export function SettingsWorkspace() {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    const selectedProviderIsVisible = visibleProviderAdapterList.some(
+      (adapter) => adapter.id === selectedProviderId,
+    );
+
+    if (settings.providers[selectedProviderId] && selectedProviderIsVisible) {
+      return;
+    }
+
+    const activeProviderIsVisible = visibleProviderAdapterList.some(
+      (adapter) => adapter.id === settings.activeModelSelection.text.providerId,
+    );
+
+    setSelectedProviderId(
+      activeProviderIsVisible
+        ? settings.activeModelSelection.text.providerId
+        : visibleProviderAdapterList[0].id,
+    );
+  }, [
+    selectedProviderId,
+    settings.activeModelSelection.text.providerId,
+    settings.providers,
+  ]);
 
   const applyDataDirectory = async (directory?: string) => {
     setStorageActionStatus("loading");
@@ -213,160 +261,147 @@ export function SettingsWorkspace() {
     }
   };
 
-  const setModelTestStatus = (
-    kind: ModelTestKind,
-    status: ModelTestStatus,
-  ) => {
+  const setModelTestStatus = (key: string, status: ModelTestStatus) => {
     setModelTestStatuses((statuses) => ({
       ...statuses,
-      [kind]: status,
+      [key]: status,
     }));
   };
 
   const resetModelTestStatuses = () => {
-    setModelTestStatuses({ text: "idle", image: "idle" });
+    setModelTestStatuses({});
   };
 
-  const buildModelTestRequest = useCallback(
-    (provider: ApiProvider, kind: ModelTestKind) => ({
-      ...buildModelFetchRequest(provider),
+  const buildModelFetchRequest = (providerId: ProviderId) => {
+    const provider = settings.providers[providerId];
+    return {
+      channel: "text" as const,
+      provider: providerId,
+      baseUrl: provider.baseUrl,
+      customHeaders: provider.customHeaders,
+      debugLoggingEnabled: settings.debugLoggingEnabled,
+      debugLogRetentionDays: settings.debugLogRetentionDays,
+    };
+  };
+
+  const buildModelTestRequest = (
+    providerId: ProviderId,
+    kind: ModelTestKind,
+  ) => {
+    const provider = settings.providers[providerId];
+    const modelSettings =
+      kind === "text" ? provider.textModel : provider.imageModel;
+    return {
+      channel: kind,
+      provider: providerId,
+      baseUrl: provider.baseUrl,
+      customHeaders: provider.customHeaders,
       kind,
-      reasoningEnabled: settings.reasoningEnabled,
-      reasoningEffort: settings.reasoningEffort,
-      responseVerbosity: settings.responseVerbosity,
-      streamResponses: settings.streamResponses,
-      model:
-        kind === "text"
-          ? provider === "openai"
-            ? settings.textModel
-            : settings.customTextModel ?? ""
-          : provider === "openai"
-            ? settings.imageModel
-            : settings.customImageModel ?? "",
-    }),
-    [
-      buildModelFetchRequest,
-      settings.customImageModel,
-      settings.customTextModel,
-      settings.imageModel,
-      settings.reasoningEffort,
-      settings.reasoningEnabled,
-      settings.responseVerbosity,
-      settings.streamResponses,
-      settings.textModel,
-    ],
-  );
+      reasoningEnabled: modelSettings.reasoningEnabled,
+      reasoningEffort: modelSettings.reasoningEffort,
+      responseVerbosity: modelSettings.responseVerbosity,
+      streamResponses: modelSettings.streamResponses,
+      model: modelSettings.model,
+      debugLoggingEnabled: settings.debugLoggingEnabled,
+      debugLogRetentionDays: settings.debugLogRetentionDays,
+    };
+  };
 
-  const fetchModelsForProvider = useCallback(
-    async (
-      provider: ApiProvider,
-      options: { assumeApiKeySaved?: boolean } = {},
-    ) => {
-      const request = buildModelFetchRequest(provider);
-      const isApiKeySaved =
-        options.assumeApiKeySaved ||
-        (provider === "openai"
-          ? settings.openAiApiKeySaved
-          : settings.customApiKeySaved);
+  const fetchModels = async (providerId: ProviderId) => {
+    const provider = settings.providers[providerId];
+    const adapter = getProviderAdapter(providerId);
 
-      if (!request.baseUrl.trim()) {
-        const errorMessage = t(locale, "baseUrlRequiredForModelFetch");
-        setModelOptions([]);
-        setModelOptionsProvider(provider);
-        setModelFetchStatus("error");
-        setModelNotice({
-          titleKey: "modelsFetchError",
-          tone: "error",
-          message: errorMessage,
-        });
-        return;
-      }
+    if (!adapter.supportsModelList) {
+      return;
+    }
 
-      if (!isApiKeySaved) {
-        const errorMessage = t(locale, "apiKeyRequiredForModelFetch");
-        setModelOptions([]);
-        setModelOptionsProvider(provider);
-        setModelFetchStatus("error");
-        setModelNotice({
-          titleKey: "modelsFetchError",
-          tone: "error",
-          message: errorMessage,
-        });
-        return;
-      }
+    if (!provider.baseUrl.trim()) {
+      setModelFetchStatus(providerId, "error");
+      setModelNotice({
+        titleKey: "modelsFetchError",
+        tone: "error",
+        message: t(locale, "baseUrlRequiredForModelFetch"),
+      });
+      return;
+    }
 
-      setModelFetchStatus("loading");
-      setModelOptionsProvider(provider);
+    if (!provider.apiKeySaved) {
+      setModelFetchStatus(providerId, "error");
+      setModelNotice({
+        titleKey: "modelsFetchError",
+        tone: "error",
+        message: t(locale, "apiKeyRequiredForModelFetch"),
+      });
+      return;
+    }
+
+    setModelFetchStatus(providerId, "loading");
+    setModelNotice(null);
+
+    try {
+      const models = await fetchProviderModels(buildModelFetchRequest(providerId));
+      setModelOptionsByProvider((options) => ({
+        ...options,
+        [providerId]: models,
+      }));
+      setModelFetchStatus(providerId, "ready");
       setModelNotice(null);
 
-      try {
-        const models = await fetchProviderModels(request);
-        setModelOptions(models);
-        setModelOptionsProvider(provider);
-        setModelFetchStatus("ready");
-        setModelNotice(null);
-
-        if (models[0] && provider === "custom") {
-          const settingsUpdate: Partial<AppSettings> = {};
-
-          if (
-            !settings.customTextModel ||
-            settings.customTextModel === "custom-text-model"
-          ) {
-            settingsUpdate.customTextModel =
-              getSuggestedModelId(models, "text") ?? models[0].id;
-          }
-
-          if (
-            !settings.customImageModel ||
-            settings.customImageModel === "custom-image-model"
-          ) {
-            settingsUpdate.customImageModel = getSuggestedModelId(
-              models,
-              "image",
-            );
-          }
-
-          if (Object.keys(settingsUpdate).length > 0) {
-            updateSettings(settingsUpdate);
-          }
+      const providerUpdate: Partial<ProviderConfig> = {};
+      for (const capability of adapter.capabilities) {
+        const modelSettings =
+          capability === "text" ? provider.textModel : provider.imageModel;
+        if (modelSettings.model.trim()) {
+          continue;
         }
-      } catch (error) {
-        const errorMessage = getModelFetchErrorMessage(locale, error);
-        setModelOptions([]);
-        setModelOptionsProvider(provider);
-        setModelFetchStatus("error");
-        setModelNotice({
-          titleKey: "modelsFetchError",
-          tone: "error",
-          message: errorMessage,
-        });
-      }
-    },
-    [
-      buildModelFetchRequest,
-      locale,
-      settings.customApiKeySaved,
-      settings.customImageModel,
-      settings.customTextModel,
-      settings.openAiApiKeySaved,
-      updateSettings,
-    ],
-  );
 
-  const fetchModels = (provider: ApiProvider) => {
-    void fetchModelsForProvider(provider);
+        const suggestedModel =
+          getSuggestedModelId(models, capability) ?? models[0]?.id;
+        if (!suggestedModel) {
+          continue;
+        }
+
+        if (capability === "text") {
+          providerUpdate.textModel = {
+            ...provider.textModel,
+            model: suggestedModel,
+          };
+        } else {
+          providerUpdate.imageModel = {
+            ...provider.imageModel,
+            model: suggestedModel,
+          };
+        }
+      }
+
+      if (providerUpdate.textModel || providerUpdate.imageModel) {
+        updateProvider(providerId, providerUpdate);
+        resetModelTestStatuses();
+      }
+    } catch (error) {
+      setModelOptionsByProvider((options) => ({
+        ...options,
+        [providerId]: [],
+      }));
+      setModelFetchStatus(providerId, "error");
+      setModelNotice({
+        titleKey: "modelsFetchError",
+        tone: "error",
+        message: getModelFetchErrorMessage(locale, error),
+      });
+    }
   };
 
-  const testConnection = async (provider: ApiProvider, kind: ModelTestKind) => {
-    const request = buildModelTestRequest(provider, kind);
-    const isApiKeySaved =
-      provider === "openai"
-        ? settings.openAiApiKeySaved
-        : settings.customApiKeySaved;
+  const testConnection = async (
+    providerId: ProviderId,
+    kind: ModelTestKind,
+  ) => {
+    const request = buildModelTestRequest(providerId, kind);
+    const provider = settings.providers[request.provider];
+    const statusKey = `${providerId}:${kind}`;
 
     if (!request.baseUrl.trim()) {
-      setModelTestStatus(kind, "error");
+      setModelTestStatus(statusKey, "error");
       setModelNotice({
         titleKey: "modelTestError",
         tone: "error",
@@ -375,8 +410,8 @@ export function SettingsWorkspace() {
       return;
     }
 
-    if (!isApiKeySaved) {
-      setModelTestStatus(kind, "error");
+    if (!provider.apiKeySaved) {
+      setModelTestStatus(statusKey, "error");
       setModelNotice({
         titleKey: "modelTestError",
         tone: "error",
@@ -386,7 +421,7 @@ export function SettingsWorkspace() {
     }
 
     if (!request.model.trim()) {
-      setModelTestStatus(kind, "error");
+      setModelTestStatus(statusKey, "error");
       setModelNotice({
         titleKey: "modelTestError",
         tone: "error",
@@ -400,12 +435,12 @@ export function SettingsWorkspace() {
       return;
     }
 
-    setModelTestStatus(kind, "loading");
+    setModelTestStatus(statusKey, "loading");
     setModelNotice(null);
 
     try {
       const result = await testProviderConnection(request);
-      setModelTestStatus(kind, "ready");
+      setModelTestStatus(statusKey, "ready");
       setModelNotice({
         titleKey:
           kind === "image" ? "imageModelTestReady" : "textModelTestReady",
@@ -416,7 +451,7 @@ export function SettingsWorkspace() {
             : t(locale, "modelTestOutput").replace("{output}", result.output),
       });
     } catch (error) {
-      setModelTestStatus(kind, "error");
+      setModelTestStatus(statusKey, "error");
       setModelNotice({
         titleKey: "modelTestError",
         tone: "error",
@@ -425,61 +460,68 @@ export function SettingsWorkspace() {
     }
   };
 
-  const saveApiKey = async (provider: ApiProvider, apiKey: string) => {
-    const trimmedKey = apiKey.trim();
+  const saveApiKey = async (providerId: ProviderId) => {
+    const trimmedKey = (apiKeyDrafts[providerId] ?? "").trim();
     if (!trimmedKey) {
       return;
     }
 
-    setSecretActionProvider(provider);
+    setSecretActionProvider(providerId);
     setSecretError(null);
 
     try {
-      const isSaved = await saveProviderApiKey(provider, trimmedKey);
-      updateSettings(
-        provider === "openai"
-          ? { openAiApiKeySaved: isSaved }
-          : { customApiKeySaved: isSaved },
-      );
-
-      if (provider === "openai") {
-        setOpenAiApiKeyDraft("");
-      } else {
-        setCustomApiKeyDraft("");
-      }
-      setModelOptions([]);
-      setModelOptionsProvider(null);
-      setModelFetchStatus("idle");
+      const isSaved = await saveProviderApiKey(providerId, trimmedKey);
+      updateProvider(providerId, {
+        apiKeySaved: isSaved,
+        enabled: true,
+      });
+      setApiKeyDrafts((drafts) => ({
+        ...drafts,
+        [providerId]: "",
+      }));
+      setModelOptionsByProvider((options) => ({
+        ...options,
+        [providerId]: [],
+      }));
+      setModelFetchStatus(providerId, "idle");
       setModelNotice(null);
       resetModelTestStatuses();
     } catch (error) {
-      setSecretError({ provider, message: getErrorMessage(error) });
+      setSecretError({ provider: providerId, message: getErrorMessage(error) });
     } finally {
       setSecretActionProvider(null);
     }
   };
 
-  const clearApiKey = async (provider: ApiProvider) => {
-    setSecretActionProvider(provider);
+  const clearApiKey = async (providerId: ProviderId) => {
+    setSecretActionProvider(providerId);
     setSecretError(null);
 
     try {
-      const isSaved = await clearProviderApiKey(provider);
-      updateSettings(
-        provider === "openai"
-          ? { openAiApiKeySaved: isSaved }
-          : { customApiKeySaved: isSaved },
-      );
-      setModelOptions([]);
-      setModelOptionsProvider(null);
-      setModelFetchStatus("idle");
+      const isSaved = await clearProviderApiKey(providerId);
+      updateProvider(providerId, { apiKeySaved: isSaved });
+      setModelOptionsByProvider((options) => ({
+        ...options,
+        [providerId]: [],
+      }));
+      setModelFetchStatus(providerId, "idle");
       resetModelTestStatuses();
       setModelNotice(null);
     } catch (error) {
-      setSecretError({ provider, message: getErrorMessage(error) });
+      setSecretError({ provider: providerId, message: getErrorMessage(error) });
     } finally {
       setSecretActionProvider(null);
     }
+  };
+
+  const setModelFetchStatus = (
+    providerId: ProviderId,
+    status: ModelFetchStatus,
+  ) => {
+    setModelFetchStatuses((statuses) => ({
+      ...statuses,
+      [providerId]: status,
+    }));
   };
 
   const viewDebugLogs = async () => {
@@ -499,6 +541,17 @@ export function SettingsWorkspace() {
     }
   };
 
+  const selectedAdapter = getProviderAdapter(selectedProviderId);
+  const selectedProvider = settings.providers[selectedProviderId];
+  const selectedModels = modelOptionsByProvider[selectedProviderId] ?? [];
+  const selectedFetchStatus =
+    modelFetchStatuses[selectedProviderId] ?? "idle";
+  const selectedDraft = apiKeyDrafts[selectedProviderId] ?? "";
+  const selectedTextStatus =
+    modelTestStatuses[`${selectedProviderId}:text`] ?? "idle";
+  const selectedImageStatus =
+    modelTestStatuses[`${selectedProviderId}:image`] ?? "idle";
+
   return (
     <section
       className="settings-workspace"
@@ -510,182 +563,104 @@ export function SettingsWorkspace() {
           locale={locale}
           titleKey="modelConfiguration"
         />
+        <SettingsNoticeSlot
+          locale={locale}
+          notice={modelNotice}
+          onDismiss={() => setModelNotice(null)}
+        />
+        <div
+          className="provider-picker"
+          role="tablist"
+          aria-label={t(locale, "selectProvider")}
+        >
+          {visibleProviderAdapterList.map((adapter) => {
+            const provider = settings.providers[adapter.id];
+            const isSelected = selectedProviderId === adapter.id;
 
-        <div className="settings-field">
-          <span>{t(locale, "activeProvider")}</span>
-          <div
-            className="provider-switch"
-            role="group"
-            aria-label={t(locale, "activeProvider")}
-          >
-            {providerOptions.map((option) => (
+            return (
               <button
-                className={settings.apiProvider === option.value ? "active" : ""}
-                key={option.value}
+                aria-selected={isSelected}
+                className={
+                  isSelected
+                    ? "provider-picker-button active"
+                    : "provider-picker-button"
+                }
+                key={adapter.id}
+                role="tab"
                 type="button"
-                onClick={() => {
-                  updateSetting("apiProvider", option.value);
-                  setModelOptions([]);
-                  setModelOptionsProvider(null);
-                  setModelFetchStatus("idle");
-                  resetModelTestStatuses();
-                  setModelNotice(null);
-                }}
+                onClick={() => setSelectedProviderId(adapter.id)}
               >
-                {t(locale, option.labelKey)}
+                <span className="provider-picker-name">
+                  <Server size={16} aria-hidden="true" />
+                  <strong>{t(locale, adapter.labelKey)}</strong>
+                </span>
+                <span className="provider-picker-meta">
+                  <span
+                    className={
+                      provider.apiKeySaved
+                        ? "provider-status-dot active"
+                        : "provider-status-dot"
+                    }
+                    aria-hidden="true"
+                  />
+                  {t(
+                    locale,
+                    provider.apiKeySaved
+                      ? "providerConfigured"
+                      : "providerNotConfigured",
+                  )}
+                </span>
               </button>
-            ))}
-          </div>
+            );
+          })}
         </div>
-
         <div className="model-config-grid">
-          {settings.apiProvider === "openai" ? (
-            <div className="model-config-panel active">
+          <div
+            className={
+              selectedProvider.enabled
+                ? "model-config-panel active"
+                : "model-config-panel"
+            }
+            role="tabpanel"
+          >
             <div className="model-config-title-row">
               <div className="model-config-title">
-                <SlidersHorizontal size={17} aria-hidden="true" />
-                <h3>{t(locale, "openAiConfiguration")}</h3>
+                <Server size={17} aria-hidden="true" />
+                <h3>{t(locale, selectedAdapter.labelKey)}</h3>
+                <span className="provider-capability-tags">
+                  {selectedAdapter.capabilities.map((capability) => (
+                    <small key={capability}>
+                      {t(
+                        locale,
+                        capability === "text"
+                          ? "textCapability"
+                          : "imageCapability",
+                      )}
+                    </small>
+                  ))}
+                </span>
               </div>
               <div className="model-config-actions">
                 <FetchModelsControl
-                  count={
-                    modelOptionsProvider === "openai" ? modelOptions.length : 0
-                  }
+                  count={selectedModels.length}
                   locale={locale}
-                  status={modelFetchStatus}
-                  onFetch={() => fetchModels("openai")}
-                />
-                <TestConnectionControl
-                  labelKey="testTextModel"
-                  locale={locale}
-                  readyKey="textModelTestReady"
-                  status={modelTestStatuses.text}
-                  onTest={() => void testConnection("openai", "text")}
-                />
-                <TestConnectionControl
-                  labelKey="testImageModel"
-                  locale={locale}
-                  readyKey="imageModelTestReady"
-                  status={modelTestStatuses.image}
-                  onTest={() => void testConnection("openai", "image")}
+                  status={selectedFetchStatus}
+                  onFetch={() => void fetchModels(selectedProviderId)}
                 />
               </div>
             </div>
-            <SettingsNoticeSlot
-              locale={locale}
-              notice={modelNotice}
-              onDismiss={() => setModelNotice(null)}
-            />
             <div className="settings-fields two-columns">
-              <label className="settings-field">
-                <FieldLabel labelKey="baseUrl" locale={locale} required />
-                <div className="input-with-icon">
-                  <Link2 size={16} aria-hidden="true" />
-                  <input
-                    aria-required="true"
-                    className="settings-input"
-                    required
-                    value={settings.openAiBaseUrl}
-                    onChange={(event) => {
-                      updateSetting("openAiBaseUrl", event.target.value);
-                      resetModelTestStatuses();
-                    }}
-                  />
-                </div>
-              </label>
-              <SecretField
-                actionPending={secretActionProvider === "openai"}
-                error={secretError?.provider === "openai" ? secretError.message : ""}
-                isSaved={settings.openAiApiKeySaved}
-                isVisible={showOpenAiKey}
-                labelKey="apiKey"
-                locale={locale}
-                value={openAiApiKeyDraft}
-                onClear={() => void clearApiKey("openai")}
-                onSave={() => void saveApiKey("openai", openAiApiKeyDraft)}
-                onToggle={() => setShowOpenAiKey((isVisible) => !isVisible)}
-                onChange={setOpenAiApiKeyDraft}
-              />
-              <ModelField
-                fieldId="openai-text-model"
-                labelKey="textModel"
-                locale={locale}
-                options={modelOptionsProvider === "openai" ? modelOptions : []}
-                value={settings.textModel}
-                onChange={(value) => {
-                  updateSetting("textModel", value);
-                  setModelTestStatus("text", "idle");
-                }}
-              />
-              <ModelField
-                fieldId="openai-image-model"
-                labelKey="imageModel"
-                locale={locale}
-                options={modelOptionsProvider === "openai" ? modelOptions : []}
-                value={settings.imageModel}
-                onChange={(value) => {
-                  updateSetting("imageModel", value);
-                  setModelTestStatus("image", "idle");
-                }}
-              />
-              <RuntimeParameters
-                locale={locale}
-                settings={settings}
-                onChange={(settingsUpdate) => {
-                  updateSettings(settingsUpdate);
-                  resetModelTestStatuses();
-                }}
-              />
-            </div>
-            </div>
-          ) : (
-            <div className="model-config-panel active">
-            <div className="model-config-title-row">
-              <div className="model-config-title">
-                <SlidersHorizontal size={17} aria-hidden="true" />
-                <h3>{t(locale, "customProviderConfiguration")}</h3>
-              </div>
-              <div className="model-config-actions">
-                <FetchModelsControl
-                  count={
-                    modelOptionsProvider === "custom" ? modelOptions.length : 0
-                  }
-                  locale={locale}
-                  status={modelFetchStatus}
-                  onFetch={() => fetchModels("custom")}
-                />
-                <TestConnectionControl
-                  labelKey="testTextModel"
-                  locale={locale}
-                  readyKey="textModelTestReady"
-                  status={modelTestStatuses.text}
-                  onTest={() => void testConnection("custom", "text")}
-                />
-                <TestConnectionControl
-                  labelKey="testImageModel"
-                  locale={locale}
-                  readyKey="imageModelTestReady"
-                  status={modelTestStatuses.image}
-                  onTest={() => void testConnection("custom", "image")}
-                />
-              </div>
-            </div>
-            <SettingsNoticeSlot
-              locale={locale}
-              notice={modelNotice}
-              onDismiss={() => setModelNotice(null)}
-            />
-            <div className="settings-fields two-columns">
-              <label className="settings-field wide-field">
-                <span>{t(locale, "providerName")}</span>
+              <label className="settings-check provider-enabled-check">
                 <input
-                  className="settings-input"
-                  placeholder={t(locale, "customProviderNamePlaceholder")}
-                  value={settings.customProviderName ?? ""}
+                  checked={selectedProvider.enabled}
+                  type="checkbox"
                   onChange={(event) =>
-                    updateSetting("customProviderName", event.target.value)
+                    updateProvider(selectedProviderId, {
+                      enabled: event.target.checked,
+                    })
                   }
                 />
+                <span>{t(locale, "providerEnabled")}</span>
               </label>
               <label className="settings-field">
                 <FieldLabel labelKey="baseUrl" locale={locale} required />
@@ -694,81 +669,132 @@ export function SettingsWorkspace() {
                   <input
                     aria-required="true"
                     className="settings-input"
-                    placeholder={t(locale, "customBaseUrlPlaceholder")}
                     required
-                    value={settings.customBaseUrl ?? ""}
+                    value={selectedProvider.baseUrl}
                     onChange={(event) => {
-                      updateSetting("customBaseUrl", event.target.value);
+                      updateProvider(selectedProviderId, {
+                        baseUrl: event.target.value,
+                      });
                       resetModelTestStatuses();
                     }}
                   />
                 </div>
               </label>
               <SecretField
-                actionPending={secretActionProvider === "custom"}
-                error={secretError?.provider === "custom" ? secretError.message : ""}
-                isSaved={settings.customApiKeySaved}
-                isVisible={showCustomKey}
+                actionPending={secretActionProvider === selectedProviderId}
+                error={
+                  secretError?.provider === selectedProviderId
+                    ? secretError.message
+                    : ""
+                }
+                isSaved={selectedProvider.apiKeySaved}
+                isVisible={visibleApiKeys[selectedProviderId] === true}
                 labelKey="apiKey"
                 locale={locale}
-                value={customApiKeyDraft}
-                onClear={() => void clearApiKey("custom")}
-                onSave={() => void saveApiKey("custom", customApiKeyDraft)}
-                onToggle={() => setShowCustomKey((isVisible) => !isVisible)}
-                onChange={setCustomApiKeyDraft}
+                value={selectedDraft}
+                onClear={() => void clearApiKey(selectedProviderId)}
+                onSave={() => void saveApiKey(selectedProviderId)}
+                onToggle={() =>
+                  setVisibleApiKeys((visible) => ({
+                    ...visible,
+                    [selectedProviderId]: !visible[selectedProviderId],
+                  }))
+                }
+                onChange={(value) =>
+                  setApiKeyDrafts((drafts) => ({
+                    ...drafts,
+                    [selectedProviderId]: value,
+                  }))
+                }
               />
-              <ModelField
-                fieldId="custom-text-model"
-                labelKey="textModel"
-                locale={locale}
-                options={modelOptionsProvider === "custom" ? modelOptions : []}
-                value={settings.customTextModel ?? ""}
-                onChange={(value) => {
-                  updateSetting("customTextModel", value);
-                  setModelTestStatus("text", "idle");
-                }}
-              />
-              <ModelField
-                fieldId="custom-image-model"
-                labelKey="imageModel"
-                locale={locale}
-                options={modelOptionsProvider === "custom" ? modelOptions : []}
-                value={settings.customImageModel ?? ""}
-                onChange={(value) => {
-                  updateSetting("customImageModel", value);
-                  setModelTestStatus("image", "idle");
-                }}
-              />
-              <RuntimeParameters
-                locale={locale}
-                settings={settings}
-                onChange={(settingsUpdate) => {
-                  updateSettings(settingsUpdate);
-                  resetModelTestStatuses();
-                }}
-              />
-              <label className="settings-field">
-                <span>{t(locale, "customHeaders")}</span>
-                <textarea
-                  className="settings-textarea"
-                  placeholder={t(locale, "customHeadersPlaceholder")}
-                  value={settings.customHeaders ?? ""}
-                  onChange={(event) => {
-                    updateSetting("customHeaders", event.target.value);
-                    resetModelTestStatuses();
-                  }}
+              {selectedAdapter.supportsCustomHeaders ? (
+                <label className="settings-field">
+                  <span>{t(locale, "customHeaders")}</span>
+                  <textarea
+                    className="settings-textarea"
+                    placeholder={t(locale, "customHeadersPlaceholder")}
+                    value={selectedProvider.customHeaders ?? ""}
+                    onChange={(event) => {
+                      updateProvider(selectedProviderId, {
+                        customHeaders: event.target.value,
+                      });
+                      resetModelTestStatuses();
+                    }}
+                  />
+                </label>
+              ) : null}
+            </div>
+            {selectedAdapter.capabilities.includes("text") ? (
+              <div className="provider-model-card">
+                <div className="provider-model-card-title">
+                  <strong>{t(locale, "textModel")}</strong>
+                  <TestConnectionControl
+                    labelKey="testTextModel"
+                    locale={locale}
+                    readyKey="textModelTestReady"
+                    status={selectedTextStatus}
+                    onTest={() => void testConnection(selectedProviderId, "text")}
+                  />
+                </div>
+                <ModelField
+                  fieldId={`${selectedProviderId}-text-model`}
+                  labelKey="modelName"
+                  locale={locale}
+                  options={selectedModels}
+                  value={selectedProvider.textModel.model}
+                  onChange={(model) =>
+                    updateProviderTextModel(selectedProviderId, { model })
+                  }
                 />
-              </label>
-            </div>
-            </div>
-          )}
-        </div>
-
-        <div className="settings-field">
-          <span>{t(locale, "saveState")}</span>
-          <div className={`save-state save-state-${storageStatus}`}>
-            <Save size={16} aria-hidden="true" />
-            {t(locale, storageStatusKeys[storageStatus])}
+                <RuntimeParameters
+                  locale={locale}
+                  runtime={selectedProvider.textModel}
+                  titleKey="textRuntimeParameters"
+                  onChange={(textModelUpdate) =>
+                    updateProviderTextModel(selectedProviderId, textModelUpdate)
+                  }
+                />
+              </div>
+            ) : null}
+            {selectedAdapter.capabilities.includes("image") ? (
+              <div className="provider-model-card">
+                <div className="provider-model-card-title">
+                  <strong>{t(locale, "imageModel")}</strong>
+                  <TestConnectionControl
+                    labelKey="testImageModel"
+                    locale={locale}
+                    readyKey="imageModelTestReady"
+                    status={selectedImageStatus}
+                    onTest={() => void testConnection(selectedProviderId, "image")}
+                  />
+                </div>
+                <ModelField
+                  fieldId={`${selectedProviderId}-image-model`}
+                  labelKey="modelName"
+                  locale={locale}
+                  options={selectedModels}
+                  value={selectedProvider.imageModel.model}
+                  onChange={(model) =>
+                    updateProviderImageModel(selectedProviderId, { model })
+                  }
+                />
+                <RuntimeParameters
+                  locale={locale}
+                  runtime={selectedProvider.imageModel}
+                  titleKey="imageRuntimeParameters"
+                  onChange={(imageModelUpdate) =>
+                    updateProviderImageModel(selectedProviderId, imageModelUpdate)
+                  }
+                />
+                <ImageModelParameters
+                  locale={locale}
+                  value={selectedProvider.imageModel}
+                  onChange={(imageModelUpdate) =>
+                    updateProviderImageModel(selectedProviderId, imageModelUpdate)
+                  }
+                />
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
@@ -957,7 +983,14 @@ export function SettingsWorkspace() {
           </div>
         </div>
       </div>
+
+      <div className="settings-field">
+        <span>{t(locale, "saveState")}</span>
+        <div className={`save-state save-state-${storageStatus}`}>
+          <Save size={16} aria-hidden="true" />
+          {t(locale, storageStatusKeys[storageStatus])}
+        </div>
+      </div>
     </section>
   );
 }
-

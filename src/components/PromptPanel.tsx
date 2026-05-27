@@ -5,17 +5,26 @@ import {
   styleOptions,
 } from "../data/mockProject";
 import { outputSizeLabels, qualityLabels, styleLabels, t } from "../i18n";
+import { getConfiguredImageProvider } from "../modules/settings/settingsDomain";
+import { visibleProviderAdapterList } from "../modules/settings/providerAdapters";
 import { usePromptGridStore } from "../state/usePromptGridStore";
-import type { AspectRatio, OutputSize, Quality, WorkflowMode } from "../types";
+import type {
+  AspectRatio,
+  ModelCapability,
+  OutputSize,
+  ProviderId,
+  Quality,
+  WorkflowMode,
+} from "../types";
 import {
   Check,
   ChevronDown,
-  FolderOpen,
+  Image,
   ImagePlus,
-  MessageSquare,
   Play,
   Plus,
   Sparkles,
+  Type,
   Wand2,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -35,8 +44,8 @@ export function PromptPanel() {
   const isConversationSaved = usePromptGridStore(
     (state) => state.isConversationSaved,
   );
-  const projects = usePromptGridStore((state) => state.projects);
   const settings = usePromptGridStore((state) => state.settings);
+  const updateSettings = usePromptGridStore((state) => state.updateSettings);
   const isAnalyzing = usePromptGridStore((state) => state.isAnalyzing);
   const isGenerating = usePromptGridStore((state) => state.isGenerating);
   const workflowMode = usePromptGridStore((state) => state.workflowMode);
@@ -46,9 +55,6 @@ export function PromptPanel() {
     (state) => state.setOriginalPrompt,
   );
   const setSourceImage = usePromptGridStore((state) => state.setSourceImage);
-  const startNewConversation = usePromptGridStore(
-    (state) => state.startNewConversation,
-  );
   const setStyle = usePromptGridStore((state) => state.setStyle);
   const setAspectRatio = usePromptGridStore((state) => state.setAspectRatio);
   const setQuality = usePromptGridStore((state) => state.setQuality);
@@ -73,12 +79,9 @@ export function PromptPanel() {
   const ideaFieldRef = useRef<HTMLDivElement>(null);
   const sourceImageInputRef = useRef<HTMLInputElement>(null);
   const selectedStyleLabel = styleLabels[locale][project.style];
-  const configuredImageModel =
-    settings.apiProvider === "openai"
-      ? settings.imageModel
-      : settings.customImageModel ?? "";
+  const configuredImageProvider = getConfiguredImageProvider(settings);
+  const configuredImageModel = configuredImageProvider.model;
   const supportsFlexibleOutputSize =
-    settings.apiProvider === "custom" ||
     configuredImageModel.toLowerCase().includes("gpt-image-2");
   const mainTask = tasks.find((task) => task.role === "main");
   const isConfigurationLocked = Boolean(conversation.configurationLocked);
@@ -95,6 +98,46 @@ export function PromptPanel() {
     Boolean(mainTask.imagePath) &&
     !isAnalyzing &&
     !isGenerating;
+  const modelChoices = visibleProviderAdapterList
+    .filter((adapter) => {
+      const provider = settings.providers[adapter.id];
+      return provider.enabled && provider.apiKeySaved;
+    })
+    .map((adapter) => ({
+      adapter,
+      provider: settings.providers[adapter.id],
+    }));
+
+  const updateActiveModelProvider = (
+    capability: ModelCapability,
+    providerId: ProviderId,
+  ) => {
+    updateSettings({
+      activeModelSelection: {
+        ...settings.activeModelSelection,
+        [capability]: {
+          providerId,
+        },
+      },
+    });
+  };
+  const textModelChoices = modelChoices.filter(({ adapter }) =>
+    adapter.capabilities.includes("text"),
+  );
+  const imageModelChoices = modelChoices.filter(({ adapter }) =>
+    adapter.capabilities.includes("image"),
+  );
+  const activeTextProviderId = textModelChoices.some(
+    ({ adapter }) => adapter.id === settings.activeModelSelection.text.providerId,
+  )
+    ? settings.activeModelSelection.text.providerId
+    : (textModelChoices[0]?.adapter.id ?? settings.activeModelSelection.text.providerId);
+  const activeImageProviderId = imageModelChoices.some(
+    ({ adapter }) => adapter.id === settings.activeModelSelection.image.providerId,
+  )
+    ? settings.activeModelSelection.image.providerId
+    : (imageModelChoices[0]?.adapter.id ??
+      settings.activeModelSelection.image.providerId);
 
   const handleSourceImageChange = (file?: File) => {
     if (!file) {
@@ -152,31 +195,65 @@ export function PromptPanel() {
 
   return (
     <aside className="prompt-panel" aria-label={t(locale, "promptControls")}>
-      <section className="panel-section">
-        <label className="field-label icon-label" htmlFor="project-select">
-          <FolderOpen size={15} aria-hidden="true" />
-          {t(locale, "projectName")}
+      <section className="panel-section model-selection-section">
+        <label className="field-label icon-label" htmlFor="active-text-model">
+          <Type size={15} aria-hidden="true" />
+          {t(locale, "activeTextModel")}
         </label>
         <select
-          id="project-select"
+          id="active-text-model"
           className="settings-input"
-          value={project.id}
-          disabled={isAnalyzing || isGenerating}
-          onChange={(event) => startNewConversation(event.target.value)}
+          value={activeTextProviderId}
+          disabled={isAnalyzing || isGenerating || textModelChoices.length === 0}
+          onChange={(event) =>
+            updateActiveModelProvider("text", event.target.value as ProviderId)
+          }
         >
-          {projects.map((projectItem) => (
-            <option key={projectItem.id} value={projectItem.id}>
-              {projectItem.title}
+          {textModelChoices.length === 0 ? (
+            <option value={settings.activeModelSelection.text.providerId}>
+              {t(locale, "noConfiguredProvider")}
             </option>
-          ))}
+          ) : (
+            textModelChoices.map(({ adapter, provider }) => (
+              <option key={adapter.id} value={adapter.id}>
+                {formatModelChoice(
+                  t(locale, adapter.labelKey),
+                  provider.textModel.model,
+                  t(locale, "modelNotSelected"),
+                )}
+              </option>
+            ))
+          )}
         </select>
-        <div className="conversation-status">
-          <MessageSquare size={15} aria-hidden="true" />
-          <span>{t(locale, "conversationName")}</span>
-          <strong>
-            {isConversationSaved ? conversation.title : t(locale, "newConversation")}
-          </strong>
-        </div>
+        <label className="field-label icon-label" htmlFor="active-image-model">
+          <Image size={15} aria-hidden="true" />
+          {t(locale, "activeImageModel")}
+        </label>
+        <select
+          id="active-image-model"
+          className="settings-input"
+          value={activeImageProviderId}
+          disabled={isAnalyzing || isGenerating || imageModelChoices.length === 0}
+          onChange={(event) =>
+            updateActiveModelProvider("image", event.target.value as ProviderId)
+          }
+        >
+          {imageModelChoices.length === 0 ? (
+            <option value={settings.activeModelSelection.image.providerId}>
+              {t(locale, "noConfiguredProvider")}
+            </option>
+          ) : (
+            imageModelChoices.map(({ adapter, provider }) => (
+              <option key={adapter.id} value={adapter.id}>
+                {formatModelChoice(
+                  t(locale, adapter.labelKey),
+                  provider.imageModel.model,
+                  t(locale, "modelNotSelected"),
+                )}
+              </option>
+            ))
+          )}
+        </select>
       </section>
 
       <section className="panel-section">
@@ -526,4 +603,13 @@ export function PromptPanel() {
       )}
     </aside>
   );
+}
+
+function formatModelChoice(
+  providerLabel: string,
+  model: string,
+  fallback: string,
+) {
+  const selectedModel = model.trim() || fallback;
+  return `${providerLabel} / ${selectedModel}`;
 }

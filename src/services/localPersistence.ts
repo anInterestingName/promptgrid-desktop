@@ -1,5 +1,11 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import type { AppSnapshot, Conversation, GridCell, Project } from "../types";
+import type {
+  AppSnapshot,
+  Conversation,
+  GridCell,
+  Project,
+  ProviderId,
+} from "../types";
 
 const FALLBACK_STORAGE_KEY = "promptgrid.workspace.snapshot.v1";
 const DEV_SECRET_PREFIX = "promptgrid.dev.api-key";
@@ -85,6 +91,22 @@ export async function openProjectFolder(project: Project): Promise<void> {
   });
 }
 
+export async function openImageInFileManager(imagePath: string): Promise<void> {
+  if (!isTauri()) {
+    throw new Error("Open image location is only available in the desktop app.");
+  }
+
+  await invoke("open_image_in_file_manager", { imagePath });
+}
+
+export async function copyImageFile(imagePath: string): Promise<void> {
+  if (!isTauri()) {
+    throw new Error("Copy image file is only available in the desktop app.");
+  }
+
+  await invoke("copy_image_file_to_clipboard", { imagePath });
+}
+
 export async function saveGeneratedImage({
   imageDataUrl,
   project,
@@ -122,7 +144,11 @@ function sanitizeSnapshot(snapshot: AppSnapshot): AppSnapshot {
     ...snapshot.settings,
   } as AppSnapshot["settings"] & {
     openAiApiKey?: string;
+    deepseekApiKey?: string;
     customApiKey?: string;
+    openAiApiKeySaved?: boolean;
+    deepseekApiKeySaved?: boolean;
+    customApiKeySaved?: boolean;
   };
 
   if (settings.openAiApiKey?.trim()) {
@@ -130,22 +156,121 @@ function sanitizeSnapshot(snapshot: AppSnapshot): AppSnapshot {
       `${DEV_SECRET_PREFIX}.openai`,
       settings.openAiApiKey.trim(),
     );
-    settings.openAiApiKeySaved = true;
+    markProviderApiKeySaved(settings, "openai");
   }
 
   if (settings.customApiKey?.trim()) {
     window.sessionStorage.setItem(
-      `${DEV_SECRET_PREFIX}.custom`,
+      `${DEV_SECRET_PREFIX}.openai-compatible`,
       settings.customApiKey.trim(),
     );
-    settings.customApiKeySaved = true;
+    markProviderApiKeySaved(settings, "openai-compatible");
+  }
+
+  if (settings.deepseekApiKey?.trim()) {
+    window.sessionStorage.setItem(
+      `${DEV_SECRET_PREFIX}.deepseek`,
+      settings.deepseekApiKey.trim(),
+    );
+    markProviderApiKeySaved(settings, "deepseek");
   }
 
   delete settings.openAiApiKey;
   delete settings.customApiKey;
+  delete settings.deepseekApiKey;
+  delete settings.openAiApiKeySaved;
+  delete settings.customApiKeySaved;
+  delete settings.deepseekApiKeySaved;
 
   return {
     ...snapshot,
     settings,
+  };
+}
+
+function markProviderApiKeySaved(
+  settings: AppSnapshot["settings"],
+  providerId: ProviderId,
+) {
+  const providers = settings.providers ?? {
+    openai: {
+      enabled: true,
+      baseUrl: "https://api.openai.com/v1",
+      apiKeySaved: false,
+      textModel: {
+        model: "gpt-4o-mini",
+        reasoningEnabled: false,
+        reasoningEffort: "medium",
+        responseVerbosity: "medium",
+        streamResponses: false,
+      },
+      imageModel: {
+        model: "gpt-image-1",
+        reasoningEnabled: false,
+        reasoningEffort: "medium",
+        responseVerbosity: "medium",
+        streamResponses: true,
+        quality: "auto",
+        background: "auto",
+        outputFormat: "png",
+        outputCompression: 100,
+      },
+    },
+    deepseek: {
+      enabled: false,
+      baseUrl: "https://api.deepseek.com",
+      apiKeySaved: false,
+      textModel: {
+        model: "deepseek-chat",
+        reasoningEnabled: false,
+        reasoningEffort: "medium",
+        responseVerbosity: "medium",
+        streamResponses: false,
+      },
+      imageModel: {
+        model: "",
+        reasoningEnabled: false,
+        reasoningEffort: "medium",
+        responseVerbosity: "medium",
+        streamResponses: true,
+        quality: "auto",
+        background: "auto",
+        outputFormat: "png",
+        outputCompression: 100,
+      },
+    },
+    "openai-compatible": {
+      enabled: false,
+      baseUrl: "",
+      apiKeySaved: false,
+      customHeaders: "",
+      textModel: {
+        model: "",
+        reasoningEnabled: false,
+        reasoningEffort: "medium",
+        responseVerbosity: "medium",
+        streamResponses: false,
+      },
+      imageModel: {
+        model: "",
+        reasoningEnabled: false,
+        reasoningEffort: "medium",
+        responseVerbosity: "medium",
+        streamResponses: true,
+        quality: "auto",
+        background: "auto",
+        outputFormat: "png",
+        outputCompression: 100,
+      },
+    },
+  };
+
+  settings.providers = {
+    ...providers,
+    [providerId]: {
+      ...providers[providerId],
+      apiKeySaved: true,
+      enabled: true,
+    },
   };
 }

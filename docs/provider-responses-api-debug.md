@@ -21,7 +21,18 @@ Request:
   "url": "https://lyapi.cloud/v1/responses",
   "body": {
     "model": "gpt-5.5",
-    "input": "Reply with exactly: OK",
+    "input": [
+      {
+        "type": "message",
+        "role": "user",
+        "content": [
+          {
+            "type": "input_text",
+            "text": "Reply with exactly: OK"
+          }
+        ]
+      }
+    ],
     "reasoning": {
       "effort": "xhigh"
     },
@@ -70,6 +81,79 @@ The parser should accept text from:
 - `response.output_item.done.item.content[].text`
 - non-streaming `response.output_text`
 - non-streaming `response.output[].content[].text`
+
+## Codex Responses Wire Format
+
+Unified provider requests now use Responses input items instead of plain string
+`input`. A single prompt is sent as one user message:
+
+```json
+{
+  "model": "model-id",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Prompt text"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Image generation keeps the same input item shape and adds the Responses image
+tool:
+
+```json
+{
+  "model": "image-model-id",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {
+          "type": "input_text",
+          "text": "Image prompt"
+        }
+      ]
+    }
+  ],
+  "tools": [
+    {
+      "type": "image_generation"
+    }
+  ],
+  "tool_choice": {
+    "type": "image_generation"
+  }
+}
+```
+
+Streaming reader support now covers these Responses events:
+
+- `response.output_item.added`
+- `response.output_text.delta`
+- `response.output_text.done`
+- `response.content_part.done`
+- `response.output_item.done`
+- `response.function_call_arguments.delta`
+- `response.function_call_arguments.done`
+- `response.reasoning.delta`
+- `response.reasoning.done`
+- `response.reasoning_summary_text.delta`
+- `response.reasoning_summary_text.done`
+- `response.completed`
+- `response.failed`
+- `response.image_generation_call.*`
+
+Reasoning and function-call events are stored as output items; they are not
+treated as the primary user-visible text. `response.failed` is converted into a
+provider error before business handlers try to read text or images.
 
 ## Debug Log Location
 
