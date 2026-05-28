@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default desktop capability for PromptGrid.",
+  "description": "Default desktop capability for FangCun.",
   "windows": ["main"],
   "permissions": ["core:default", "opener:default", "opener:allow-open-path"]
 }

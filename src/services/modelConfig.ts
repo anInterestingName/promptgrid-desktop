@@ -8,7 +8,8 @@ import type {
   ResponseVerbosity,
 } from "../types";
 
-const DEV_SECRET_PREFIX = "promptgrid.dev.api-key";
+const DEV_SECRET_PREFIX = "fangcun.dev.api-key";
+const LEGACY_DEV_SECRET_PREFIX = "promptgrid.dev.api-key";
 
 export type ModelFetchRequest = {
   channel: ModelCapability;
@@ -50,6 +51,7 @@ export async function saveProviderApiKey(
   }
 
   window.sessionStorage.setItem(getDevSecretKey(provider), trimmedKey);
+  window.sessionStorage.removeItem(getLegacyDevSecretKey(provider));
   return true;
 }
 
@@ -61,6 +63,7 @@ export async function clearProviderApiKey(
   }
 
   window.sessionStorage.removeItem(getDevSecretKey(provider));
+  window.sessionStorage.removeItem(getLegacyDevSecretKey(provider));
   return false;
 }
 
@@ -73,7 +76,7 @@ export async function fetchProviderModels(
     return invoke<ModelOption[]>("fetch_provider_models", { request });
   }
 
-  const apiKey = window.sessionStorage.getItem(getDevSecretKey(request.provider));
+  const apiKey = getDevApiKey(request.provider);
   if (!apiKey) {
     throw new Error("API key is not saved for this provider");
   }
@@ -97,7 +100,7 @@ export async function testProviderConnection(
     throw new Error("Base URL is required");
   }
 
-  const apiKey = window.sessionStorage.getItem(getDevSecretKey(request.provider));
+  const apiKey = getDevApiKey(request.provider);
   if (!apiKey) {
     throw new Error("API key is not saved for this provider");
   }
@@ -126,6 +129,17 @@ function getDevSecretKey(provider: ProviderId) {
   return `${DEV_SECRET_PREFIX}.${getProviderSecretKey(provider)}`;
 }
 
+function getLegacyDevSecretKey(provider: ProviderId) {
+  return `${LEGACY_DEV_SECRET_PREFIX}.${getProviderSecretKey(provider)}`;
+}
+
+function getDevApiKey(provider: ProviderId) {
+  return (
+    window.sessionStorage.getItem(getDevSecretKey(provider)) ??
+    window.sessionStorage.getItem(getLegacyDevSecretKey(provider))
+  );
+}
+
 async function ensureDebugLoggingConfigured(request: ModelFetchRequest) {
   await configureDebugLogging({
     enabled: request.debugLoggingEnabled === true,
@@ -145,7 +159,7 @@ async function requestDevProviderProxy<ResponseBody>(
     streamResponses?: boolean;
   },
 ): Promise<ResponseBody> {
-  const response = await fetch(`/__promptgrid_dev/provider-${action}`, {
+  const response = await fetch(`/__fangcun_dev/provider-${action}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",

@@ -177,7 +177,7 @@ fn debug_log_state() -> &'static Mutex<DebugLogState> {
     DEBUG_LOG_STATE.get_or_init(|| {
         Mutex::new(DebugLogState {
             enabled: false,
-            log_dir: PathBuf::from("promptgrid-debug-logs"),
+            log_dir: PathBuf::from("fangcun-debug-logs"),
             retention_days: DEFAULT_RETENTION_DAYS,
         })
     })

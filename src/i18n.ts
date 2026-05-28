@@ -18,7 +18,9 @@ const messages = {
     localProject: "Local Workspace",
     localConfiguration: "Local Configuration",
     projectNavigation: "Workspace navigation",
-    workspaceAria: "PromptGrid workspace",
+    brandName: "FangCun",
+    brandSubtitle: "方寸画境",
+    workspaceAria: "FangCun workspace",
     workspaceSections: "Workspace sections",
     projectTitle: "Launch Cover Directions",
     settingsTitle: "Settings",
@@ -32,6 +34,7 @@ const messages = {
     newProject: "New Project",
     newConversation: "New Chat",
     projectActions: "Project actions",
+    conversationActions: "Chat actions",
     openInExplorer: "Open in Explorer",
     openProjectFolderDesktopOnly:
       "Open in Explorer is only available in the desktop app.",
@@ -40,7 +43,12 @@ const messages = {
       "Desktop runtime needs to be restarted to load this command.",
     rename: "Rename",
     renameProject: "Rename Project",
+    renameConversation: "Rename Chat",
     projectAlreadyExists: "Project already exists",
+    conversationAlreadyExists: "Chat already exists in this project",
+    deleteConversation: "Delete Chat",
+    deleteConversationConfirm:
+      "This will delete the chat record and its local folder, including generated images and metadata.",
     remove: "Remove",
     create: "Create",
     cancel: "Cancel",
@@ -228,7 +236,7 @@ const messages = {
     storageFolderSaved: "Data folder updated",
     storageFolderError: "Data folder update failed",
     storageFolderHint:
-      "Choose a writable folder with the system picker. PromptGrid stores app.db there and removes the old SQLite files after a successful move.",
+      "Choose a writable folder with the system picker. FangCun stores app.db there and removes the old SQLite files after a successful move.",
     saveState: "Save State",
     saveStateIdle: "Idle",
     saveStateLoading: "Loading",
@@ -254,7 +262,7 @@ const messages = {
     promptForCell: "Prompt for cell",
     previewImage: "Preview image",
     retryCell: "Retry cell",
-    regenerateCell: "Regenerate cell",
+    regenerateCell: "Regenerate",
     expandFromCell: "Expand from cell",
     imageActions: "Image actions",
     openImageInFileManager: "Open in Explorer",
@@ -277,7 +285,9 @@ const messages = {
     localProject: "本地工作区",
     localConfiguration: "本地配置",
     projectNavigation: "工作区导航",
-    workspaceAria: "PromptGrid 工作台",
+    brandName: "方寸画境",
+    brandSubtitle: "FangCun",
+    workspaceAria: "方寸画境工作台",
     workspaceSections: "工作区导航",
     projectTitle: "发布封面方向探索",
     settingsTitle: "设置",
@@ -291,13 +301,19 @@ const messages = {
     newProject: "新建项目",
     newConversation: "新建对话",
     projectActions: "项目操作",
+    conversationActions: "对话操作",
     openInExplorer: "在资源管理器中打开",
     openProjectFolderDesktopOnly: "在资源管理器中打开只支持桌面端应用。",
     openProjectFolderError: "无法打开项目文件夹",
     openProjectFolderRestartRequired: "请重启桌面端应用以加载这个新命令。",
     rename: "重命名",
     renameProject: "重命名项目",
+    renameConversation: "重命名对话",
     projectAlreadyExists: "项目已存在",
+    conversationAlreadyExists: "该项目下已存在同名对话",
+    deleteConversation: "删除对话",
+    deleteConversationConfirm:
+      "将删除该对话的数据库记录和本地文件夹，包括已生成图片与元数据。",
     remove: "移除",
     create: "创建",
     cancel: "取消",
@@ -479,7 +495,7 @@ const messages = {
     storageFolderSaved: "数据位置已更新",
     storageFolderError: "数据位置更新失败",
     storageFolderHint:
-      "请通过系统文件夹选择器选择可写目录，PromptGrid 会把 app.db 保存在那里，并在切换成功后清理旧位置的 SQLite 文件。",
+      "请通过系统文件夹选择器选择可写目录，方寸画境会把 app.db 保存在那里，并在切换成功后清理旧位置的 SQLite 文件。",
     saveState: "保存状态",
     saveStateIdle: "空闲",
     saveStateLoading: "读取中",
@@ -505,7 +521,7 @@ const messages = {
     promptForCell: "格子提示词",
     previewImage: "预览图片",
     retryCell: "重试格子",
-    regenerateCell: "重新生成格子",
+    regenerateCell: "重新生成",
     expandFromCell: "从格子扩展",
     imageActions: "图片操作",
     openImageInFileManager: "在文件管理器中打开",
@@ -527,7 +543,9 @@ export function t(locale: Locale, key: MessageKey) {
 }
 
 export function getInitialLocale(): Locale {
-  const savedLocale = window.localStorage.getItem("promptgrid-locale");
+  const savedLocale =
+    window.localStorage.getItem("fangcun-locale") ??
+    window.localStorage.getItem("promptgrid-locale");
   if (savedLocale === "zh" || savedLocale === "en") {
     return savedLocale;
   }
@@ -536,7 +554,7 @@ export function getInitialLocale(): Locale {
 }
 
 export function saveLocale(locale: Locale) {
-  window.localStorage.setItem("promptgrid-locale", locale);
+  window.localStorage.setItem("fangcun-locale", locale);
 }
 
 export const styleLabels: Record<Locale, Record<string, string>> = {

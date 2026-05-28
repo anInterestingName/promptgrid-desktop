@@ -87,7 +87,7 @@ API keys should be handled separately from normal settings.
 Recommended layout:
 
 ```text
-PromptGrid/
+FangCun/
   app.db
   projects/
     <project-id>/

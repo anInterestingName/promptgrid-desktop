@@ -2,7 +2,7 @@
 
 ## Name
 
-PromptGrid Desktop
+FangCun / 方寸画境
 
 ## One-Line Positioning
 

@@ -5,13 +5,15 @@ export type DebugLoggingConfig = {
   retentionDays: number;
 };
 
+const DEBUG_LOGGING_CONFIG_KEY = "fangcun.debugLogging.config";
+
 export async function configureDebugLogging({
   enabled,
   retentionDays,
 }: DebugLoggingConfig): Promise<void> {
   if (!isTauri()) {
     window.localStorage.setItem(
-      "promptgrid.debugLogging.config",
+      DEBUG_LOGGING_CONFIG_KEY,
       JSON.stringify({ enabled, retentionDays }),
     );
     return;

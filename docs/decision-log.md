@@ -61,7 +61,7 @@ Selected cell expansion is a P0 MVP workflow.
 Rationale:
 
 - Competitors already support multi-image results or variation workflows.
-- PromptGrid needs a clear differentiator beyond batch generation.
+- FangCun needs a clear differentiator beyond batch generation.
 - Expansion turns the app into an exploration workspace.
 
 Consequences:

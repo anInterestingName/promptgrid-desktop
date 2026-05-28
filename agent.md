@@ -1,8 +1,8 @@
-# PromptGrid Desktop Agent Guide
+# FangCun Agent Guide
 
 ## Project Identity
 
-`promptgrid-desktop` is the implementation project for PromptGrid, a local-first desktop app for AI visual direction exploration.
+`fangcun-desktop` is the implementation project for FangCun / 方寸画境, a local-first desktop app for AI visual direction exploration.
 
 The product is not a generic batch image generator. Its core workflow is:
 

@@ -1,12 +1,12 @@
 [package]
-name = "promptgrid-desktop"
+name = "fangcun-desktop"
 version = "0.1.0"
 description = "Local-first AI visual direction exploration desktop app."
-authors = ["PromptGrid"]
+authors = ["FangCun"]
 edition = "2021"
 
 [lib]
-name = "promptgrid_desktop_lib"
+name = "fangcun_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

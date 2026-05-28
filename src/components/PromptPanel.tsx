@@ -20,7 +20,6 @@ import type {
   OutputSize,
   ProviderId,
   Quality,
-  WorkflowMode,
 } from "../types";
 import {
   Check,
@@ -323,7 +322,6 @@ export function PromptPanel() {
             </div>
           ) : null}
         </div>
-        <p className="workflow-description">{activeWorkflowConfig.description}</p>
       </section>
 
       <section className="panel-section">

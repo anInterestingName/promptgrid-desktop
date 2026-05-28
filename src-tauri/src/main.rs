@@ -1,3 +1,3 @@
 fn main() {
-    promptgrid_desktop_lib::run()
+    fangcun_desktop_lib::run()
 }

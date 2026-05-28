@@ -1,13 +1,18 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import {
+  AlertTriangle,
   FolderOpen,
-  Grid3X3,
   MoreHorizontal,
   Plus,
   Settings2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import { ContextMenu } from "./ContextMenu";
 import {
   getContextMenuPosition,
@@ -31,6 +36,9 @@ const navItems: Array<{
 const projectContextMenuWidth = 172;
 const projectContextMenuHeight = 136;
 const projectContextMenuGap = 6;
+const conversationContextMenuWidth = 156;
+const conversationContextMenuHeight = 88;
+const conversationContextMenuGap = 6;
 
 function getProjectMenuPosition({
   preferredX,
@@ -54,6 +62,25 @@ function getProjectMenuPosition({
   });
 }
 
+function getConversationMenuPosition({
+  preferredX,
+  preferredY,
+  boundaryRight,
+}: {
+  preferredX: number;
+  preferredY: number;
+  boundaryRight: number;
+}) {
+  return getContextMenuPosition({
+    preferredX,
+    preferredY,
+    width: conversationContextMenuWidth,
+    height: conversationContextMenuHeight,
+    gap: conversationContextMenuGap,
+    boundaryRight,
+  });
+}
+
 export function ProjectSidebar() {
   const locale = usePromptGridStore((state) => state.locale);
   const activeSection = usePromptGridStore((state) => state.activeSection);
@@ -72,6 +99,12 @@ export function ProjectSidebar() {
   const openConversation = usePromptGridStore((state) => state.openConversation);
   const renameProject = usePromptGridStore((state) => state.renameProject);
   const removeProject = usePromptGridStore((state) => state.removeProject);
+  const renameConversation = usePromptGridStore(
+    (state) => state.renameConversation,
+  );
+  const removeConversation = usePromptGridStore(
+    (state) => state.removeConversation,
+  );
   const currentRound = usePromptGridStore((state) => state.currentRound);
   const completedCount = usePromptGridStore(
     (state) => state.tasks.filter((task) => task.status === "completed").length,
@@ -86,14 +119,23 @@ export function ProjectSidebar() {
     x?: number;
     y?: number;
   }>();
+  const [openConversationMenu, setOpenConversationMenu] = useState<{
+    conversationId: string;
+    x: number;
+    y: number;
+  }>();
   const [renamingProject, setRenamingProject] = useState<Project>();
+  const [renamingConversation, setRenamingConversation] =
+    useState<Conversation>();
+  const [deletingConversation, setDeletingConversation] =
+    useState<Conversation>();
   const [projectFolderError, setProjectFolderError] = useState("");
 
   const projectTree = useMemo(
     () =>
-      sortByCreatedAt(projects).map((item) => ({
+      sortByUpdatedAt(projects).map((item) => ({
         project: item,
-        conversations: sortByCreatedAt(
+        conversations: sortByUpdatedAt(
           conversations.filter(
             (candidate) => candidate.projectId === item.id,
           ),
@@ -102,7 +144,7 @@ export function ProjectSidebar() {
     [conversations, projects],
   );
   const recentConversations = useMemo(
-    () => sortByCreatedAt(conversations).slice(0, 4),
+    () => sortByUpdatedAt(conversations).slice(0, 4),
     [conversations],
   );
 
@@ -133,15 +175,39 @@ export function ProjectSidebar() {
       });
   }
 
+  function openConversationContextMenu(
+    event: ReactMouseEvent,
+    conversationItem: Conversation,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    const sidebarRight =
+      event.currentTarget.closest(".sidebar")?.getBoundingClientRect().right ??
+      window.innerWidth;
+    setOpenProjectMenu(undefined);
+    setOpenConversationMenu({
+      conversationId: conversationItem.id,
+      ...getConversationMenuPosition({
+        preferredX: event.clientX,
+        preferredY: event.clientY,
+        boundaryRight: sidebarRight,
+      }),
+    });
+  }
+
   return (
     <aside className="sidebar" aria-label={t(locale, "projectNavigation")}>
       <div className="brand-lockup">
-        <div className="brand-mark">
-          <Grid3X3 size={20} aria-hidden="true" />
+        <div className="brand-mark" aria-hidden="true">
+          <span className="brand-mark-window">
+            <span className="brand-mark-sun" />
+            <span className="brand-mark-ridge" />
+            <span className="brand-mark-cells" />
+          </span>
         </div>
         <div>
-          <strong>PromptGrid</strong>
-          <span>{t(locale, "desktop")}</span>
+          <strong>{t(locale, "brandName")}</strong>
+          <span>{t(locale, "brandSubtitle")}</span>
         </div>
       </div>
 
@@ -191,6 +257,7 @@ export function ProjectSidebar() {
                   const sidebarRight =
                     event.currentTarget.closest(".sidebar")?.getBoundingClientRect()
                       .right ?? window.innerWidth;
+                  setOpenConversationMenu(undefined);
                   setOpenProjectMenu({
                     projectId: item.project.id,
                     ...getProjectMenuPosition({
@@ -258,6 +325,9 @@ export function ProjectSidebar() {
                       key={child.id}
                       locale={locale}
                       onOpen={() => openConversation(child.id)}
+                      onContextMenu={(event) =>
+                        openConversationContextMenu(event, child)
+                      }
                     />
                   ))}
                 </div>
@@ -281,6 +351,7 @@ export function ProjectSidebar() {
                   ?.title
               }
               onOpen={() => openConversation(item.id)}
+              onContextMenu={(event) => openConversationContextMenu(event, item)}
             />
           ))}
         </div>
@@ -326,6 +397,64 @@ export function ProjectSidebar() {
           setRenamingProject(undefined);
         }}
       />
+      <RenameConversationDialog
+        conversation={renamingConversation}
+        conversations={conversations}
+        locale={locale}
+        onOpenChange={(open) => {
+          if (!open) {
+            setRenamingConversation(undefined);
+          }
+        }}
+        onRename={(conversationId, title) => {
+          renameConversation(conversationId, title);
+          setRenamingConversation(undefined);
+        }}
+      />
+      <DeleteConversationDialog
+        conversation={deletingConversation}
+        locale={locale}
+        onDelete={(conversationId) => {
+          removeConversation(conversationId);
+          setDeletingConversation(undefined);
+        }}
+        onOpenChange={(open) => {
+          if (!open) {
+            setDeletingConversation(undefined);
+          }
+        }}
+      />
+      {openConversationMenu ? (
+        <ContextMenu
+          ariaLabel={t(locale, "conversationActions")}
+          className="conversation-context-menu"
+          items={getConversationContextMenuItems({
+            locale,
+            onRename: () => {
+              const conversationItem = conversations.find(
+                (candidate) =>
+                  candidate.id === openConversationMenu.conversationId,
+              );
+              if (conversationItem) {
+                setRenamingConversation(conversationItem);
+              }
+              setOpenConversationMenu(undefined);
+            },
+            onRemove: () => {
+              const conversationItem = conversations.find(
+                (candidate) =>
+                  candidate.id === openConversationMenu.conversationId,
+              );
+              if (conversationItem) {
+                setDeletingConversation(conversationItem);
+              }
+              setOpenConversationMenu(undefined);
+            },
+          })}
+          position={{ x: openConversationMenu.x, y: openConversationMenu.y }}
+          onClose={() => setOpenConversationMenu(undefined)}
+        />
+      ) : null}
     </aside>
   );
 }
@@ -477,6 +606,117 @@ function RenameProjectDialog({
   );
 }
 
+function RenameConversationDialog({
+  locale,
+  conversation,
+  conversations,
+  onOpenChange,
+  onRename,
+}: {
+  locale: Locale;
+  conversation?: Conversation;
+  conversations: Conversation[];
+  onOpenChange: (open: boolean) => void;
+  onRename: (conversationId: string, title: string) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const trimmedTitle = title.trim();
+  const hasDuplicateTitle =
+    Boolean(conversation && trimmedTitle) &&
+    conversations.some(
+      (candidate) =>
+        candidate.projectId === conversation?.projectId &&
+        candidate.id !== conversation?.id &&
+        candidate.title.trim().toLocaleLowerCase() ===
+          trimmedTitle.toLocaleLowerCase(),
+    );
+
+  useEffect(() => {
+    setTitle(conversation?.title ?? "");
+  }, [conversation]);
+
+  function submitRename() {
+    if (conversation && trimmedTitle && !hasDuplicateTitle) {
+      onRename(conversation.id, trimmedTitle);
+    }
+  }
+
+  return (
+    <Dialog.Root open={Boolean(conversation)} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content className="form-dialog">
+          <DialogHeader locale={locale} title={t(locale, "renameConversation")} />
+          <label className="settings-field">
+            <span>{t(locale, "conversationName")}</span>
+            <input
+              className="settings-input"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  submitRename();
+                }
+              }}
+            />
+            {hasDuplicateTitle ? (
+              <p className="settings-error">
+                {t(locale, "conversationAlreadyExists")}
+              </p>
+            ) : null}
+          </label>
+          <DialogActions
+            actionLabel={t(locale, "rename")}
+            locale={locale}
+            onCancel={() => onOpenChange(false)}
+            onCreate={submitRename}
+          />
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
+function DeleteConversationDialog({
+  locale,
+  conversation,
+  onDelete,
+  onOpenChange,
+}: {
+  locale: Locale;
+  conversation?: Conversation;
+  onDelete: (conversationId: string) => void;
+  onOpenChange: (open: boolean) => void;
+}) {
+  return (
+    <Dialog.Root open={Boolean(conversation)} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content className="form-dialog">
+          <DialogHeader locale={locale} title={t(locale, "deleteConversation")} />
+          <div className="danger-dialog-body">
+            <AlertTriangle size={22} aria-hidden="true" />
+            <p>
+              {t(locale, "deleteConversationConfirm")}
+            </p>
+          </div>
+          <DialogActions
+            actionClassName="danger-action"
+            actionLabel={t(locale, "deleteConversation")}
+            locale={locale}
+            onCancel={() => onOpenChange(false)}
+            onCreate={() => {
+              if (conversation) {
+                onDelete(conversation.id);
+              }
+            }}
+          />
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  );
+}
+
 function DialogHeader({ locale, title }: { locale: Locale; title: string }) {
   return (
     <div className="dialog-topline">
@@ -489,11 +729,13 @@ function DialogHeader({ locale, title }: { locale: Locale; title: string }) {
 }
 
 function DialogActions({
+  actionClassName = "primary-action",
   actionLabel,
   locale,
   onCancel,
   onCreate,
 }: {
+  actionClassName?: string;
   actionLabel?: string;
   locale: Locale;
   onCancel: () => void;
@@ -504,7 +746,7 @@ function DialogActions({
       <button className="secondary-action compact-action" type="button" onClick={onCancel}>
         {t(locale, "cancel")}
       </button>
-      <button className="primary-action compact-action" type="button" onClick={onCreate}>
+      <button className={`${actionClassName} compact-action`} type="button" onClick={onCreate}>
         {actionLabel ?? t(locale, "create")}
       </button>
     </div>
@@ -649,17 +891,43 @@ function getProjectContextMenuItems({
   ];
 }
 
+function getConversationContextMenuItems({
+  locale,
+  onRename,
+  onRemove,
+}: {
+  locale: Locale;
+  onRename: () => void;
+  onRemove: () => void;
+}): ContextMenuItem[] {
+  return [
+    {
+      key: "rename-conversation",
+      label: t(locale, "renameConversation"),
+      onSelect: onRename,
+    },
+    {
+      key: "remove-conversation",
+      label: t(locale, "deleteConversation"),
+      danger: true,
+      onSelect: onRemove,
+    },
+  ];
+}
+
 function ConversationButton({
   item,
   projectTitle,
   isActive,
   locale,
+  onContextMenu,
   onOpen,
 }: {
   item: Conversation;
   projectTitle?: string;
   isActive: boolean;
   locale: Locale;
+  onContextMenu?: (event: ReactMouseEvent) => void;
   onOpen: () => void;
 }) {
   return (
@@ -667,6 +935,7 @@ function ConversationButton({
       className={isActive ? "project-chip conversation active" : "project-chip conversation"}
       type="button"
       onClick={onOpen}
+      onContextMenu={onContextMenu}
       title={item.title}
     >
       <span className="conversation-row-content">
@@ -701,9 +970,9 @@ function PendingConversationButton({
   );
 }
 
-function sortByCreatedAt<T extends { createdAt: string }>(items: T[]) {
+function sortByUpdatedAt<T extends { updatedAt: string }>(items: T[]) {
   return [...items].sort((left, right) =>
-    left.createdAt.localeCompare(right.createdAt),
+    right.updatedAt.localeCompare(left.updatedAt),
   );
 }
 

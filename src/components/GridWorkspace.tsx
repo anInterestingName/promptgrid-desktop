@@ -4,10 +4,10 @@ import {
   Check,
   Copy,
   FolderOpen,
+  HelpCircle,
   Maximize2,
   RefreshCw,
   RotateCcw,
-  SplitSquareVertical,
   X,
 } from "lucide-react";
 import {
@@ -56,7 +56,6 @@ export function GridWorkspace() {
   );
   const regenerateTask = usePromptGridStore((state) => state.regenerateTask);
   const retryTask = usePromptGridStore((state) => state.retryTask);
-  const expandFromTask = usePromptGridStore((state) => state.expandFromTask);
   const [cellContextMenu, setCellContextMenu] = useState<{
     taskId: string;
     x: number;
@@ -228,11 +227,12 @@ export function GridWorkspace() {
               ? activeWorkflowConfig.name
               : formatGridEyebrow(project.gridSize, locale)}
           </p>
-          <h2>
-            {workflowMode === "main-detail"
-              ? activeWorkflowConfig.description
-              : t(locale, "promptDirections")}
-          </h2>
+          <div className="workspace-title-row">
+            <h2>
+              {activeWorkflowConfig.name}
+            </h2>
+            <WorkflowHelp description={activeWorkflowConfig.description} />
+          </div>
         </div>
         <div className="grid-size-switch" aria-label={t(locale, "gridSize")}>
           {gridSizeOptions.map((gridSize) => (
@@ -256,7 +256,6 @@ export function GridWorkspace() {
             key={task.id}
             locale={locale}
             task={task}
-            onExpand={() => expandFromTask(task.id)}
             onPreview={() => previewTask(task.id)}
             onRegenerate={() => regenerateTask(task.id)}
             onRetry={() => retryTask(task.id)}
@@ -322,6 +321,21 @@ export function GridWorkspace() {
   );
 }
 
+function WorkflowHelp({ description }: { description: string }) {
+  if (!description.trim()) {
+    return null;
+  }
+
+  return (
+    <span className="workflow-help">
+      <HelpCircle size={15} aria-hidden="true" />
+      <span className="workflow-help-tooltip" role="tooltip">
+        {description}
+      </span>
+    </span>
+  );
+}
+
 type GridCellCardProps = {
   task: GridCell;
   locale: Locale;
@@ -330,7 +344,6 @@ type GridCellCardProps = {
   onPreview: () => void;
   onRegenerate: () => void;
   onRetry: () => void;
-  onExpand: () => void;
   onUpdatePrompt: (prompt: string) => void;
   statusMessage?: {
     tone: "success" | "error";
@@ -346,7 +359,6 @@ function GridCellCard({
   onPreview,
   onRegenerate,
   onRetry,
-  onExpand,
   onUpdatePrompt,
   statusMessage,
 }: GridCellCardProps) {
@@ -443,17 +455,6 @@ function GridCellCard({
           ) : (
             <RefreshCw size={16} aria-hidden="true" />
           )}
-        </button>
-        <button
-          type="button"
-          title={t(locale, "expandFromCell")}
-          onClick={(event) => {
-            event.stopPropagation();
-            onExpand();
-          }}
-          onContextMenu={(event) => event.stopPropagation()}
-        >
-          <SplitSquareVertical size={16} aria-hidden="true" />
         </button>
       </footer>
     </article>

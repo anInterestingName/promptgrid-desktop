@@ -11,7 +11,7 @@ import {
 } from "./src/providerCompatibility";
 
 const host = process.env.TAURI_DEV_HOST ?? "127.0.0.1";
-const debugLogDir = join(process.cwd(), ".promptgrid-debug-logs");
+const debugLogDir = join(process.cwd(), ".fangcun-debug-logs");
 const maxLogStringLength = 12_000;
 const debugLogPrefix = "provider-requests";
 
@@ -63,7 +63,7 @@ type DevProviderProxyRequest = {
 
 function devProviderProxy(): Plugin {
   return {
-    name: "promptgrid-dev-provider-proxy",
+    name: "fangcun-dev-provider-proxy",
     configureServer(server) {
       server.middlewares.use(async (request, response, next) => {
         if (request.method !== "POST") {
@@ -72,22 +72,22 @@ function devProviderProxy(): Plugin {
         }
 
         try {
-          if (request.url === "/__promptgrid_dev/provider-models") {
+          if (request.url === "/__fangcun_dev/provider-models") {
             await handleProviderModels(request, response);
             return;
           }
 
-          if (request.url === "/__promptgrid_dev/provider-test") {
+          if (request.url === "/__fangcun_dev/provider-test") {
             await handleProviderTest(request, response);
             return;
           }
 
-          if (request.url === "/__promptgrid_dev/analyze-prompts") {
+          if (request.url === "/__fangcun_dev/analyze-prompts") {
             await handleAnalyzePrompts(request, response);
             return;
           }
 
-          if (request.url === "/__promptgrid_dev/generate-image") {
+          if (request.url === "/__fangcun_dev/generate-image") {
             await handleGenerateImage(request, response);
             return;
           }

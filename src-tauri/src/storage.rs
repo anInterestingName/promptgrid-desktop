@@ -313,6 +313,13 @@ pub struct SavedImage {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConversationMutationResult {
+    conversation: Option<Conversation>,
+    project: Option<Project>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct StorageConfig {
     data_directory: Option<String>,
 }
@@ -541,23 +548,7 @@ pub fn load_workspace(store: &LocalStore) -> Result<Option<AppSnapshot>, String>
     let (selected_project_id, selected_conversation_id, selected_task_id, current_round) =
         app_state.unwrap_or((None, None, None, 1));
 
-    let mut conversation_statement = connection
-        .prepare(
-            "
-            SELECT id, project_id, title, original_prompt, style, grid_size,
-                   aspect_ratio, quality, output_size, schema_version,
-                   created_at, updated_at, workflow_mode, main_detail, configuration_locked
-            FROM conversations
-            ORDER BY updated_at DESC
-            ",
-        )
-        .map_err(|error| error.to_string())?;
-    let conversations = conversation_statement
-        .query_map([], read_conversation)
-        .map_err(|error| error.to_string())?;
-    let conversations = conversations
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
+    let conversations = read_conversations(&connection)?;
 
     let project = selected_project_id
         .as_deref()
@@ -823,6 +814,34 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
             .map_err(|error| error.to_string())?;
     }
 
+    let previous_conversations = read_conversations(&transaction)?;
+    let mut removed_conversation_directories = Vec::new();
+    for previous_conversation in previous_conversations {
+        let Some(previous_project) = projects
+            .iter()
+            .find(|project| project.id == previous_conversation.project_id)
+        else {
+            continue;
+        };
+        if conversations
+            .iter()
+            .any(|conversation| conversation.id == previous_conversation.id)
+        {
+            continue;
+        }
+
+        removed_conversation_directories.push(conversation_directory(
+            store,
+            previous_project,
+            &previous_conversation,
+        )?);
+        transaction
+            .execute(
+                "DELETE FROM conversations WHERE id = ?1",
+                params![previous_conversation.id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
     transaction
         .execute("DELETE FROM image_tasks", [])
         .map_err(|error| error.to_string())?;
@@ -939,6 +958,18 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
         )
         .map_err(|error| error.to_string())?;
 
+    for removed_directory in &removed_conversation_directories {
+        match fs::remove_dir_all(&removed_directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Could not delete conversation folder {}: {error}",
+                    path_to_display_string(&removed_directory)
+                ));
+            }
+        }
+    }
     transaction.commit().map_err(|error| error.to_string())?;
     rename_default_project_folders(store, &previous_projects, &project_files_projects)?;
     sync_project_files(
@@ -1034,9 +1065,9 @@ pub fn project_directory(
     project_id: &str,
     project_title: &str,
     project_directory: Option<&str>,
-) -> Result<PathBuf, String> {
-    let data_dir = store
-        .data_dir
+    ) -> Result<PathBuf, String> {
+        let data_dir = store
+            .data_dir
         .lock()
         .map_err(|_| "Storage path lock is poisoned".to_string())?
         .clone();
@@ -1046,6 +1077,186 @@ pub fn project_directory(
         .map_err(|error| format!("Could not create project folder: {error}"))?;
 
     Ok(project_directory)
+}
+
+pub fn rename_conversation(
+    store: &LocalStore,
+    conversation_id: &str,
+    title: &str,
+    updated_at: &str,
+) -> Result<ConversationMutationResult, String> {
+    let title = title.trim();
+    if title.is_empty() {
+        return Err("Conversation title cannot be empty".to_string());
+    }
+    let updated_at = updated_at.trim();
+    if updated_at.is_empty() {
+        return Err("Conversation updated time cannot be empty".to_string());
+    }
+
+    let mut connection = store
+        .connection
+        .lock()
+        .map_err(|_| "Database lock is poisoned".to_string())?;
+    let conversation = read_conversation_by_id(&connection, conversation_id)?
+        .ok_or_else(|| "Conversation was not found".to_string())?;
+    let duplicate_title = connection
+        .query_row(
+            "
+            SELECT 1
+            FROM conversations
+            WHERE project_id = ?1
+              AND id <> ?2
+              AND lower(trim(title)) = lower(trim(?3))
+            LIMIT 1
+            ",
+            params![&conversation.project_id, conversation_id, title],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .is_some();
+    if duplicate_title {
+        return Err("Conversation title already exists in this project".to_string());
+    }
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "
+            UPDATE conversations
+            SET title = ?1, updated_at = ?2
+            WHERE id = ?3
+            ",
+            params![title, updated_at, conversation_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "
+            UPDATE projects
+            SET updated_at = ?1
+            WHERE id = ?2
+            ",
+            params![updated_at, &conversation.project_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+
+    let renamed_conversation = read_conversation_by_id(&connection, conversation_id)?;
+    let project = read_project_by_id(&connection, &conversation.project_id)?;
+
+    Ok(ConversationMutationResult {
+        conversation: renamed_conversation,
+        project,
+    })
+}
+
+pub fn delete_conversation(
+    store: &LocalStore,
+    conversation_id: &str,
+    updated_at: &str,
+) -> Result<ConversationMutationResult, String> {
+    let updated_at = updated_at.trim();
+    if updated_at.is_empty() {
+        return Err("Conversation updated time cannot be empty".to_string());
+    }
+
+    let mut connection = store
+        .connection
+        .lock()
+        .map_err(|_| "Database lock is poisoned".to_string())?;
+    let conversation = read_conversation_by_id(&connection, conversation_id)?
+        .ok_or_else(|| "Conversation was not found".to_string())?;
+    let project = read_project_by_id(&connection, &conversation.project_id)?
+        .ok_or_else(|| "Project was not found".to_string())?;
+    let conversation_directory = conversation_directory(store, &project, &conversation)?;
+
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM image_tasks WHERE conversation_id = ?1",
+            params![conversation_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM conversations WHERE id = ?1",
+            params![conversation_id],
+        )
+        .map_err(|error| error.to_string())?;
+    let next_conversation_id = transaction
+        .query_row(
+            "
+            SELECT id
+            FROM conversations
+            WHERE project_id = ?1
+            ORDER BY updated_at DESC
+            LIMIT 1
+            ",
+            params![&conversation.project_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "
+            UPDATE app_state
+            SET selected_conversation_id = ?1,
+                selected_task_id = NULL,
+                current_round = 1,
+                updated_at = ?2
+            WHERE selected_conversation_id = ?3
+            ",
+            params![&next_conversation_id, updated_at, conversation_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "
+            UPDATE projects
+            SET updated_at = ?1
+            WHERE id = ?2
+            ",
+            params![updated_at, &conversation.project_id],
+        )
+        .map_err(|error| error.to_string())?;
+
+    let deleted_directory = if conversation_directory.exists() {
+        fs::remove_dir_all(&conversation_directory).map_err(|error| {
+            format!(
+                "Could not delete conversation folder {}: {error}",
+                path_to_display_string(&conversation_directory)
+            )
+        })?;
+        true
+    } else {
+        false
+    };
+
+    if let Err(error) = transaction.commit() {
+        if deleted_directory {
+            let _ = fs::create_dir_all(&conversation_directory);
+        }
+        return Err(error.to_string());
+    }
+
+    let next_conversation = next_conversation_id
+        .as_deref()
+        .map(|id| read_conversation_by_id(&connection, id))
+        .transpose()?
+        .flatten();
+    let project = read_project_by_id(&connection, &conversation.project_id)?;
+
+    Ok(ConversationMutationResult {
+        conversation: next_conversation,
+        project,
+    })
 }
 
 fn rename_default_project_folders(
@@ -1160,6 +1371,28 @@ fn sync_project_files(
     }
 
     Ok(())
+}
+
+fn conversation_directory(
+    store: &LocalStore,
+    project: &Project,
+    conversation: &Conversation,
+) -> Result<PathBuf, String> {
+    let data_dir = store
+        .data_dir
+        .lock()
+        .map_err(|_| "Storage path lock is poisoned".to_string())?
+        .clone();
+    let project_directory = resolve_project_directory(
+        &data_dir,
+        &project.id,
+        &project.title,
+        project.project_directory.as_deref(),
+    )?;
+
+    Ok(project_directory
+        .join("conversations")
+        .join(sanitize_path_component(&conversation.id)))
 }
 
 fn grid_run_key(conversation_id: &str, grid_size: i64) -> String {
@@ -1406,6 +1639,22 @@ fn read_project(row: &rusqlite::Row<'_>) -> rusqlite::Result<Project> {
     })
 }
 
+fn read_project_by_id(connection: &Connection, project_id: &str) -> Result<Option<Project>, String> {
+    connection
+        .query_row(
+            "
+            SELECT id, title, project_directory, original_prompt, style, grid_size,
+                   aspect_ratio, quality, output_size, schema_version, created_at, updated_at
+            FROM projects
+            WHERE id = ?1
+            ",
+            params![project_id],
+            read_project,
+        )
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
 fn read_projects(connection: &Connection) -> Result<Vec<Project>, String> {
     let mut project_statement = connection
         .prepare(
@@ -1425,6 +1674,27 @@ fn read_projects(connection: &Connection) -> Result<Vec<Project>, String> {
         .map_err(|error| error.to_string())?;
 
     Ok(projects)
+}
+
+fn read_conversations(connection: &Connection) -> Result<Vec<Conversation>, String> {
+    let mut conversation_statement = connection
+        .prepare(
+            "
+            SELECT id, project_id, title, original_prompt, style, grid_size,
+                   aspect_ratio, quality, output_size, schema_version,
+                   created_at, updated_at, workflow_mode, main_detail, configuration_locked
+            FROM conversations
+            ORDER BY updated_at DESC
+            ",
+        )
+        .map_err(|error| error.to_string())?;
+    let conversations = conversation_statement
+        .query_map([], read_conversation)
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    Ok(conversations)
 }
 
 fn prune_missing_project_folders(
@@ -1515,6 +1785,26 @@ fn read_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> 
             })?,
         configuration_locked: row.get(14)?,
     })
+}
+
+fn read_conversation_by_id(
+    connection: &Connection,
+    conversation_id: &str,
+) -> Result<Option<Conversation>, String> {
+    connection
+        .query_row(
+            "
+            SELECT id, project_id, title, original_prompt, style, grid_size,
+                   aspect_ratio, quality, output_size, schema_version,
+                   created_at, updated_at, workflow_mode, main_detail, configuration_locked
+            FROM conversations
+            WHERE id = ?1
+            ",
+            params![conversation_id],
+            read_conversation,
+        )
+        .optional()
+        .map_err(|error| error.to_string())
 }
 
 fn read_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<GridCell> {

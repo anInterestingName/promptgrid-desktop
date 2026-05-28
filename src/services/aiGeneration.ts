@@ -14,7 +14,8 @@ import {
 } from "../modules/settings/settingsDomain";
 import { getProviderSecretKey } from "./modelConfig";
 
-const DEV_SECRET_PREFIX = "promptgrid.dev.api-key";
+const DEV_SECRET_PREFIX = "fangcun.dev.api-key";
+const LEGACY_DEV_SECRET_PREFIX = "promptgrid.dev.api-key";
 
 export type PromptDirection = {
   prompt: string;
@@ -187,14 +188,12 @@ async function requestDevAiProxy<ResponseBody>(
   action: "analyze-prompts" | "generate-image",
   payload: AnalyzePromptRequest | GenerateImageRequest,
 ): Promise<ResponseBody> {
-  const apiKey = window.sessionStorage.getItem(
-    `${DEV_SECRET_PREFIX}.${getProviderSecretKey(payload.provider)}`,
-  );
+  const apiKey = getDevApiKey(payload.provider);
   if (!apiKey) {
     throw new Error("API key is not saved for this provider");
   }
 
-  const response = await fetch(`/__promptgrid_dev/${action}`, {
+  const response = await fetch(`/__fangcun_dev/${action}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -216,4 +215,13 @@ async function requestDevAiProxy<ResponseBody>(
   }
 
   return responseBody as ResponseBody;
+}
+
+function getDevApiKey(provider: ProviderId) {
+  const providerKey = getProviderSecretKey(provider);
+
+  return (
+    window.sessionStorage.getItem(`${DEV_SECRET_PREFIX}.${providerKey}`) ??
+    window.sessionStorage.getItem(`${LEGACY_DEV_SECRET_PREFIX}.${providerKey}`)
+  );
 }

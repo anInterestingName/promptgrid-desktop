@@ -8,7 +8,9 @@ import {
 } from "../data/mockProject";
 import { getInitialLocale, saveLocale, type Locale } from "../i18n";
 import {
+  deleteStoredConversation,
   loadWorkspaceSnapshot,
+  renameStoredConversation,
   saveGeneratedImage,
   saveWorkspaceSnapshot,
 } from "../services/localPersistence";
@@ -100,6 +102,8 @@ type PromptGridState = {
   setProjectTitle: (title: string) => void;
   renameProject: (projectId: string, title: string) => void;
   removeProject: (projectId: string) => void;
+  renameConversation: (conversationId: string, title: string) => void;
+  removeConversation: (conversationId: string) => void;
   setConversationTitle: (title: string) => void;
   setOriginalPrompt: (prompt: string) => void;
   setStyle: (style: string) => void;
@@ -713,6 +717,26 @@ function getLatestConversationForProject(
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
 }
 
+function getConversationTaskEntries(
+  conversationTasks: Record<string, GridCell[]>,
+  conversationId: string,
+) {
+  return Object.entries(conversationTasks).filter(
+    ([taskKey]) => getConversationIdFromTaskKey(taskKey) === conversationId,
+  );
+}
+
+function removeConversationTaskEntries(
+  conversationTasks: Record<string, GridCell[]>,
+  conversationId: string,
+) {
+  return Object.fromEntries(
+    Object.entries(conversationTasks).filter(
+      ([taskKey]) => getConversationIdFromTaskKey(taskKey) !== conversationId,
+    ),
+  );
+}
+
 function sortByUpdatedAt<T extends { updatedAt: string }>(items: T[]) {
   return [...items].sort((left, right) =>
     right.updatedAt.localeCompare(left.updatedAt),
@@ -923,6 +947,108 @@ function createActiveTaskPatch(
     conversationTasks: {
       ...state.conversationTasks,
       [getGridRunKey(conversation.id, project.gridSize)]: tasks,
+    },
+  };
+}
+
+function createConversationRemovalPatch(
+  state: PromptGridState,
+  conversationId: string,
+  updatedProject?: Project,
+): Partial<PromptGridState> {
+  const removedConversation = state.conversations.find(
+    (candidate) => candidate.id === conversationId,
+  );
+  if (!removedConversation) {
+    return {};
+  }
+
+  const remainingConversations = state.conversations.filter(
+    (candidate) => candidate.id !== conversationId,
+  );
+  const conversationTasks = removeConversationTaskEntries(
+    state.conversationTasks,
+    conversationId,
+  );
+  const projectRecord =
+    updatedProject ??
+    state.projects.find((candidate) => candidate.id === removedConversation.projectId);
+  if (!projectRecord) {
+    return {
+      conversations: remainingConversations,
+      conversationTasks,
+    };
+  }
+
+  const projects = upsertById(state.projects, projectRecord);
+
+  if (state.conversation.id !== conversationId) {
+    return {
+      project:
+        state.project.id === projectRecord.id
+          ? {
+              ...state.project,
+              updatedAt: projectRecord.updatedAt,
+            }
+          : state.project,
+      projects,
+      conversations: remainingConversations,
+      conversationTasks,
+    };
+  }
+
+  const nextConversation = getLatestConversationForProject(
+    remainingConversations,
+    projectRecord.id,
+  );
+  if (!nextConversation) {
+    const pendingPatch = createPendingWorkspacePatch(
+      {
+        ...state,
+        projects,
+        conversations: remainingConversations,
+        conversationTasks,
+      },
+      projectRecord,
+    );
+
+    return {
+      ...pendingPatch,
+      projects,
+      conversations: remainingConversations,
+      conversationTasks,
+    };
+  }
+
+  const project = mergeProjectWithConversation(projectRecord, nextConversation);
+  const taskKey = getGridRunKey(nextConversation.id, project.gridSize);
+  const tasks =
+    conversationTasks[taskKey] ??
+    createMockTasks(
+      project,
+      nextConversation.originalPrompt,
+      1,
+      undefined,
+      nextConversation.id,
+    );
+
+  return {
+    ...createWorkspacePatch(
+      {
+        ...state,
+        projects,
+        conversations: remainingConversations,
+        conversationTasks,
+      },
+      project,
+      nextConversation,
+      tasks,
+    ),
+    projects,
+    conversations: remainingConversations,
+    conversationTasks: {
+      ...conversationTasks,
+      [taskKey]: tasks,
     },
   };
 }
@@ -1671,6 +1797,254 @@ export const usePromptGridStore = create<PromptGridState>((set, get) => ({
         },
       };
     }),
+  renameConversation: (conversationId, title) => {
+    const state = get();
+    const conversationRecord = state.conversations.find(
+      (candidate) => candidate.id === conversationId,
+    );
+    const trimmedTitle = title.trim();
+    if (
+      !conversationRecord ||
+      !trimmedTitle ||
+      state.conversations.some(
+        (candidate) =>
+          candidate.projectId === conversationRecord.projectId &&
+          candidate.id !== conversationId &&
+          candidate.title.trim().toLocaleLowerCase() ===
+            trimmedTitle.toLocaleLowerCase(),
+      )
+    ) {
+      return;
+    }
+
+    const updatedAt = new Date().toISOString();
+    const renamedConversation = {
+      ...conversationRecord,
+      title: trimmedTitle,
+      updatedAt,
+    };
+    const projectRecord = state.projects.find(
+      (candidate) => candidate.id === conversationRecord.projectId,
+    );
+    const updatedProject = projectRecord
+      ? {
+          ...projectRecord,
+          updatedAt,
+        }
+      : undefined;
+    const taskEntries = getConversationTaskEntries(
+      state.conversationTasks,
+      conversationId,
+    );
+
+    set((state) => ({
+      project:
+        updatedProject && state.project.id === updatedProject.id
+          ? {
+              ...state.project,
+              updatedAt,
+            }
+          : state.project,
+      conversation:
+        state.conversation.id === conversationId
+          ? {
+              ...state.conversation,
+              title: trimmedTitle,
+              updatedAt,
+            }
+          : state.conversation,
+      projects: updatedProject
+        ? upsertById(state.projects, updatedProject)
+        : state.projects,
+      conversations: upsertById(state.conversations, renamedConversation),
+    }));
+
+    void enqueueStorageMutation(() =>
+      renameStoredConversation({
+        conversationId,
+        title: trimmedTitle,
+        updatedAt,
+      }),
+    )
+      .then((result) => {
+        if (!result.conversation && !result.project) {
+          return;
+        }
+
+        set((state) => ({
+          conversation:
+            result.conversation && state.conversation.id === conversationId
+              ? result.conversation
+              : state.conversation,
+          project:
+            result.project && state.project.id === result.project.id
+              ? result.conversation && result.conversation.id === state.conversation.id
+                ? mergeProjectWithConversation(result.project, result.conversation)
+                : {
+                    ...state.project,
+                    updatedAt: result.project.updatedAt,
+                  }
+              : state.project,
+          projects: result.project
+            ? upsertById(state.projects, result.project)
+            : state.projects,
+          conversations: result.conversation
+            ? upsertById(state.conversations, result.conversation)
+            : state.conversations,
+        }));
+      })
+      .catch((error) => {
+        set((state) => {
+          const currentConversation = state.conversations.find(
+            (candidate) => candidate.id === conversationId,
+          );
+          if (!currentConversation || currentConversation.updatedAt !== updatedAt) {
+            return { storageStatus: "error" as const };
+          }
+
+          const restoredConversationTasks = {
+            ...state.conversationTasks,
+            ...Object.fromEntries(taskEntries),
+          };
+
+          return {
+            project:
+              projectRecord && state.project.id === projectRecord.id
+                ? mergeProjectWithConversation(projectRecord, conversationRecord)
+                : state.project,
+            conversation:
+              state.conversation.id === conversationId
+                ? conversationRecord
+                : state.conversation,
+            projects: projectRecord
+              ? upsertById(state.projects, projectRecord)
+              : state.projects,
+            conversations: upsertById(state.conversations, conversationRecord),
+            conversationTasks: restoredConversationTasks,
+            tasks:
+              state.conversation.id === conversationId
+                ? restoredConversationTasks[
+                    getGridRunKey(conversationRecord.id, state.project.gridSize)
+                  ] ?? state.tasks
+                : state.tasks,
+            storageStatus: "error" as const,
+          };
+        });
+        console.error("Could not rename conversation", error);
+      });
+  },
+  removeConversation: (conversationId) => {
+    const state = get();
+    const conversationRecord = state.conversations.find(
+      (candidate) => candidate.id === conversationId,
+    );
+    if (!conversationRecord) {
+      return;
+    }
+
+    const updatedAt = new Date().toISOString();
+    const previousProject = state.projects.find(
+      (candidate) => candidate.id === conversationRecord.projectId,
+    );
+    const updatedProject = previousProject
+      ? {
+          ...previousProject,
+          updatedAt,
+        }
+      : undefined;
+    const removedTaskEntries = getConversationTaskEntries(
+      state.conversationTasks,
+      conversationId,
+    );
+
+    set((state) =>
+      createConversationRemovalPatch(state, conversationId, updatedProject),
+    );
+
+    void enqueueStorageMutation(() =>
+      deleteStoredConversation({ conversationId, updatedAt }),
+    )
+      .then((result) => {
+        if (!result.project) {
+          return;
+        }
+
+        set((state) => ({
+          project:
+            state.project.id === result.project?.id
+              ? {
+                  ...state.project,
+                  updatedAt: result.project.updatedAt,
+                }
+              : state.project,
+          projects: result.project
+            ? upsertById(state.projects, result.project)
+            : state.projects,
+        }));
+      })
+      .catch((error) => {
+        set((state) => {
+          const restoredConversationTasks = {
+            ...state.conversationTasks,
+            ...Object.fromEntries(removedTaskEntries),
+          };
+          const restoredConversations = upsertById(
+            state.conversations,
+            conversationRecord,
+          );
+          const restoredProjects = previousProject
+            ? upsertById(state.projects, previousProject)
+            : state.projects;
+
+          if (state.conversation.id !== conversationId) {
+            return {
+              projects: restoredProjects,
+              conversations: restoredConversations,
+              conversationTasks: restoredConversationTasks,
+              storageStatus: "error" as const,
+            };
+          }
+
+          const projectRecord = previousProject ?? state.project;
+          const project = mergeProjectWithConversation(
+            projectRecord,
+            conversationRecord,
+          );
+          const taskKey = getGridRunKey(conversationId, project.gridSize);
+          const tasks =
+            restoredConversationTasks[taskKey] ??
+            createMockTasks(
+              project,
+              conversationRecord.originalPrompt,
+              1,
+              undefined,
+              conversationId,
+            );
+
+          return {
+            ...createWorkspacePatch(
+              {
+                ...state,
+                projects: restoredProjects,
+                conversations: restoredConversations,
+                conversationTasks: restoredConversationTasks,
+              },
+              project,
+              conversationRecord,
+              tasks,
+            ),
+            projects: restoredProjects,
+            conversations: restoredConversations,
+            conversationTasks: {
+              ...restoredConversationTasks,
+              [taskKey]: tasks,
+            },
+            storageStatus: "error" as const,
+          };
+        });
+        console.error("Could not delete conversation", error);
+      });
+  },
   setConversationTitle: (title) =>
     set((state) => {
       const updatedAt = new Date().toISOString();
@@ -2310,6 +2684,12 @@ let pendingSnapshot: AppSnapshot | undefined;
 let lastQueuedSnapshotSignature = "";
 let saveQueue = Promise.resolve();
 
+function enqueueStorageMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const mutationJob = saveQueue.catch(() => undefined).then(operation);
+  saveQueue = mutationJob.then(() => undefined);
+  return mutationJob;
+}
+
 usePromptGridStore.subscribe((state) => {
   if (!state.isHydrated || state.isHydrating) {
     return;
@@ -2332,11 +2712,7 @@ usePromptGridStore.subscribe((state) => {
 
     pendingSnapshot = undefined;
     usePromptGridStore.setState({ storageStatus: "saving" });
-    const saveJob = saveQueue
-      .catch(() => undefined)
-      .then(() => saveWorkspaceSnapshot(snapshot));
-
-    saveQueue = saveJob;
+    const saveJob = enqueueStorageMutation(() => saveWorkspaceSnapshot(snapshot));
 
     void saveJob
       .then(() => {

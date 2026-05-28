@@ -31,8 +31,13 @@ export const colorThemeOptions: Array<{
   },
 ];
 
+const COLOR_THEME_STORAGE_KEY = "fangcun-color-theme";
+const LEGACY_COLOR_THEME_STORAGE_KEY = "promptgrid-color-theme";
+
 export function getInitialColorTheme(): ColorTheme {
-  const savedTheme = window.localStorage.getItem("promptgrid-color-theme");
+  const savedTheme =
+    window.localStorage.getItem(COLOR_THEME_STORAGE_KEY) ??
+    window.localStorage.getItem(LEGACY_COLOR_THEME_STORAGE_KEY);
   if (
     savedTheme === "blue" ||
     savedTheme === "aurora" ||
@@ -46,5 +51,5 @@ export function getInitialColorTheme(): ColorTheme {
 }
 
 export function saveColorTheme(colorTheme: ColorTheme) {
-  window.localStorage.setItem("promptgrid-color-theme", colorTheme);
+  window.localStorage.setItem(COLOR_THEME_STORAGE_KEY, colorTheme);
 }

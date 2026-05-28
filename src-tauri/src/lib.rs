@@ -8,8 +8,8 @@ use model_config::{
 };
 use std::path::{Path, PathBuf};
 use storage::{
-    AppSnapshot, LocalStore, SaveGeneratedImageRequest, SaveReferenceImageRequest, SavedImage,
-    StorageInfo,
+    AppSnapshot, ConversationMutationResult, LocalStore, SaveGeneratedImageRequest,
+    SaveReferenceImageRequest, SavedImage, StorageInfo,
 };
 use tauri::{Manager, State};
 use tauri_plugin_opener::OpenerExt;
@@ -26,7 +26,7 @@ where
 
 #[tauri::command]
 fn app_status() -> &'static str {
-    "PromptGrid local runtime ready"
+    "FangCun local runtime ready"
 }
 
 #[tauri::command]
@@ -126,6 +126,30 @@ async fn open_project_folder(
 }
 
 #[tauri::command]
+async fn rename_conversation(
+    store: State<'_, LocalStore>,
+    conversation_id: String,
+    title: String,
+    updated_at: String,
+) -> Result<ConversationMutationResult, String> {
+    let store = store.inner().clone();
+    run_blocking(move || {
+        storage::rename_conversation(&store, &conversation_id, &title, &updated_at)
+    })
+    .await
+}
+
+#[tauri::command]
+async fn delete_conversation(
+    store: State<'_, LocalStore>,
+    conversation_id: String,
+    updated_at: String,
+) -> Result<ConversationMutationResult, String> {
+    let store = store.inner().clone();
+    run_blocking(move || storage::delete_conversation(&store, &conversation_id, &updated_at)).await
+}
+
+#[tauri::command]
 async fn open_image_in_file_manager(
     app: tauri::AppHandle,
     image_path: String,
@@ -208,6 +232,8 @@ pub fn run() {
             configure_debug_logging,
             open_debug_log_folder,
             open_project_folder,
+            rename_conversation,
+            delete_conversation,
             open_image_in_file_manager,
             copy_image_file_to_clipboard,
             save_provider_api_key,

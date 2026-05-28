@@ -8,8 +8,10 @@ import type {
   ProviderId,
 } from "../types";
 
-const FALLBACK_STORAGE_KEY = "promptgrid.workspace.snapshot.v1";
-const DEV_SECRET_PREFIX = "promptgrid.dev.api-key";
+const FALLBACK_STORAGE_KEY = "fangcun.workspace.snapshot.v1";
+const LEGACY_FALLBACK_STORAGE_KEY = "promptgrid.workspace.snapshot.v1";
+const DEV_SECRET_PREFIX = "fangcun.dev.api-key";
+const LEGACY_DEV_SECRET_PREFIX = "promptgrid.dev.api-key";
 
 export type StorageInfo = {
   currentDataDir: string;
@@ -23,7 +25,9 @@ export async function loadWorkspaceSnapshot(): Promise<AppSnapshot | null> {
     return invoke<AppSnapshot | null>("load_workspace");
   }
 
-  const rawSnapshot = window.localStorage.getItem(FALLBACK_STORAGE_KEY);
+  const rawSnapshot =
+    window.localStorage.getItem(FALLBACK_STORAGE_KEY) ??
+    window.localStorage.getItem(LEGACY_FALLBACK_STORAGE_KEY);
   if (!rawSnapshot) {
     return null;
   }
@@ -89,6 +93,48 @@ export async function openProjectFolder(project: Project): Promise<void> {
     projectId: project.id,
     projectTitle: project.title,
     projectDirectory: project.projectDirectory ?? null,
+  });
+}
+
+export type ConversationMutationResult = {
+  conversation?: Conversation | null;
+  project?: Project | null;
+};
+
+export async function renameStoredConversation({
+  conversationId,
+  title,
+  updatedAt,
+}: {
+  conversationId: string;
+  title: string;
+  updatedAt: string;
+}): Promise<ConversationMutationResult> {
+  if (!isTauri()) {
+    return {};
+  }
+
+  return invoke<ConversationMutationResult>("rename_conversation", {
+    conversationId,
+    title,
+    updatedAt,
+  });
+}
+
+export async function deleteStoredConversation({
+  conversationId,
+  updatedAt,
+}: {
+  conversationId: string;
+  updatedAt: string;
+}): Promise<ConversationMutationResult> {
+  if (!isTauri()) {
+    return {};
+  }
+
+  return invoke<ConversationMutationResult>("delete_conversation", {
+    conversationId,
+    updatedAt,
   });
 }
 
@@ -196,26 +242,17 @@ function sanitizeSnapshot(snapshot: AppSnapshot): AppSnapshot {
   };
 
   if (settings.openAiApiKey?.trim()) {
-    window.sessionStorage.setItem(
-      `${DEV_SECRET_PREFIX}.openai`,
-      settings.openAiApiKey.trim(),
-    );
+    setDevApiKey("openai", settings.openAiApiKey.trim());
     markProviderApiKeySaved(settings, "openai");
   }
 
   if (settings.customApiKey?.trim()) {
-    window.sessionStorage.setItem(
-      `${DEV_SECRET_PREFIX}.openai-compatible`,
-      settings.customApiKey.trim(),
-    );
+    setDevApiKey("openai-compatible", settings.customApiKey.trim());
     markProviderApiKeySaved(settings, "openai-compatible");
   }
 
   if (settings.deepseekApiKey?.trim()) {
-    window.sessionStorage.setItem(
-      `${DEV_SECRET_PREFIX}.deepseek`,
-      settings.deepseekApiKey.trim(),
-    );
+    setDevApiKey("deepseek", settings.deepseekApiKey.trim());
     markProviderApiKeySaved(settings, "deepseek");
   }
 
@@ -230,6 +267,11 @@ function sanitizeSnapshot(snapshot: AppSnapshot): AppSnapshot {
     ...snapshot,
     settings,
   };
+}
+
+function setDevApiKey(provider: ProviderId, apiKey: string) {
+  window.sessionStorage.setItem(`${DEV_SECRET_PREFIX}.${provider}`, apiKey);
+  window.sessionStorage.removeItem(`${LEGACY_DEV_SECRET_PREFIX}.${provider}`);
 }
 
 function markProviderApiKeySaved(

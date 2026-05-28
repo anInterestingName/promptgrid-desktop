@@ -1,12 +1,37 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="PromptGrid">
-  <rect width="256" height="256" rx="54" fill="#111827"/>
-  <rect x="42" y="42" width="52" height="52" rx="14" fill="#38bdf8"/>
-  <rect x="102" y="42" width="52" height="52" rx="14" fill="#f8fafc"/>
-  <rect x="162" y="42" width="52" height="52" rx="14" fill="#f97316"/>
-  <rect x="42" y="102" width="52" height="52" rx="14" fill="#f8fafc"/>
-  <rect x="102" y="102" width="52" height="52" rx="14" fill="#22c55e"/>
-  <rect x="162" y="102" width="52" height="52" rx="14" fill="#f8fafc"/>
-  <rect x="42" y="162" width="52" height="52" rx="14" fill="#f97316"/>
-  <rect x="102" y="162" width="52" height="52" rx="14" fill="#f8fafc"/>
-  <rect x="162" y="162" width="52" height="52" rx="14" fill="#38bdf8"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="FangCun">
+  <defs>
+    <linearGradient id="bg" x1="36" y1="24" x2="220" y2="232" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FDF7EC"/>
+      <stop offset="0.48" stop-color="#EAF6F4"/>
+      <stop offset="1" stop-color="#DCEAFF"/>
+    </linearGradient>
+    <linearGradient id="ink" x1="68" y1="62" x2="194" y2="204" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0F766E"/>
+      <stop offset="1" stop-color="#1D4ED8"/>
+    </linearGradient>
+    <linearGradient id="petal" x1="72" y1="66" x2="184" y2="194" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#F4B860" stop-opacity="0.68"/>
+    </linearGradient>
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="14" stdDeviation="13" flood-color="#1D4ED8" flood-opacity="0.18"/>
+    </filter>
+  </defs>
+
+  <rect width="256" height="256" rx="58" fill="url(#bg)"/>
+  <path d="M52 70C52 60.1 60.1 52 70 52H186C195.9 52 204 60.1 204 70V186C204 195.9 195.9 204 186 204H70C60.1 204 52 195.9 52 186V70Z" fill="#FFFFFF" fill-opacity="0.56"/>
+  <path d="M71 69.5H185C185.8 69.5 186.5 70.2 186.5 71V185C186.5 185.8 185.8 186.5 185 186.5H71C70.2 186.5 69.5 185.8 69.5 185V71C69.5 70.2 70.2 69.5 71 69.5Z" fill="#FFFFFF" fill-opacity="0.58" stroke="url(#ink)" stroke-width="7" filter="url(#softShadow)"/>
+
+  <path d="M128 72V185" stroke="#1D4ED8" stroke-width="3.5" stroke-linecap="round" stroke-opacity="0.25"/>
+  <path d="M72 128H184" stroke="#1D4ED8" stroke-width="3.5" stroke-linecap="round" stroke-opacity="0.25"/>
+
+  <circle cx="164" cy="93" r="10" fill="#F4A742"/>
+  <circle cx="164" cy="93" r="17" fill="#F4A742" fill-opacity="0.14"/>
+
+  <path d="M82 166C97.8 141.8 112.7 132.8 128.6 139C139.6 143.3 145.8 154.2 155.7 154.1C164.7 154 174 145.3 184 130.6V184H82V166Z" fill="url(#petal)"/>
+  <path d="M78 165.5C96.2 136.5 112.9 126.2 130.4 133.7C141.2 138.4 147 151.3 157.4 150.6C166.9 150 176.4 139.5 186 122.8" fill="none" stroke="#0F766E" stroke-width="6.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M88 183C102 165.2 115.4 158.5 128.2 163C137.1 166.1 143.4 174.3 152.3 173.5C160.2 172.8 169.2 165.7 179.2 152.2" fill="none" stroke="#1D4ED8" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.72"/>
+
+  <path d="M86 86H109V109H86V86Z" fill="#0F766E" fill-opacity="0.88"/>
+  <path d="M97.5 86V109M86 97.5H109" stroke="#FFFFFF" stroke-width="2.4" stroke-opacity="0.78"/>
 </svg>

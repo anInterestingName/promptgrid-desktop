@@ -1,7 +1,7 @@
 import { localeOptions, t } from "../i18n";
 import { colorThemeOptions } from "../theme";
 import { usePromptGridStore } from "../state/usePromptGridStore";
-import { Languages, Palette } from "lucide-react";
+import { Languages, Palette, RotateCw } from "lucide-react";
 import type { CSSProperties } from "react";
 
 export function TopBar() {
@@ -91,8 +91,12 @@ export function TopBar() {
             ))}
           </div>
         </div>
-        <div className="round-pill">
-          {t(locale, "round")} {currentRound}
+        <div className="toolbar-control round-control">
+          <span className="toolbar-label">
+            <RotateCw size={15} aria-hidden="true" />
+            {t(locale, "round")}
+          </span>
+          <div className="round-pill">{currentRound}</div>
         </div>
       </div>
     </header>
