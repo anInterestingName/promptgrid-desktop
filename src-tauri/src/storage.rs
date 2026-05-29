@@ -1,7 +1,7 @@
 use rusqlite::types::Type;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -9,6 +9,7 @@ use tauri::{AppHandle, Manager};
 
 const SETTINGS_KEY: &str = "app_settings";
 const DATABASE_FILE_NAME: &str = "app.db";
+const PROJECT_DATABASE_FILE_NAME: &str = "project.db";
 const STORAGE_CONFIG_FILE_NAME: &str = "storage-config.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -518,6 +519,8 @@ pub fn load_workspace(store: &LocalStore) -> Result<Option<AppSnapshot>, String>
         .lock()
         .map_err(|_| "Database lock is poisoned".to_string())?;
 
+    recover_project_files(store, &connection)?;
+
     let projects = read_projects(&connection)?;
     let projects = prune_missing_project_folders(store, &mut connection, projects)?;
 
@@ -548,7 +551,12 @@ pub fn load_workspace(store: &LocalStore) -> Result<Option<AppSnapshot>, String>
     let (selected_project_id, selected_conversation_id, selected_task_id, current_round) =
         app_state.unwrap_or((None, None, None, 1));
 
-    let conversations = read_conversations(&connection)?;
+    let data_dir = store
+        .data_dir
+        .lock()
+        .map_err(|_| "Storage path lock is poisoned".to_string())?
+        .clone();
+    let conversations = read_project_conversations(&data_dir, &projects)?;
 
     let project = selected_project_id
         .as_deref()
@@ -574,51 +582,7 @@ pub fn load_workspace(store: &LocalStore) -> Result<Option<AppSnapshot>, String>
         .map(|conversation| merge_project_with_conversation(project.clone(), conversation))
         .unwrap_or_else(|| project.clone());
 
-    let mut task_statement = connection
-        .prepare(
-            "
-            SELECT id, project_id, conversation_id, parent_task_id, exploration_round, cell_index,
-                   prompt, direction_title, status, image_path, error_message, provider, model,
-                   created_at, updated_at, attempt, visual_title, visual_palette,
-                   visual_texture, role, reference_images, depends_on_task_id, grid_size
-            FROM image_tasks
-            ORDER BY conversation_id, exploration_round, cell_index
-            ",
-        )
-        .map_err(|error| error.to_string())?;
-
-    let task_rows = task_statement
-        .query_map([], read_task)
-        .map_err(|error| error.to_string())?;
-    let all_tasks = task_rows
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())?;
-    let mut conversation_tasks: HashMap<String, Vec<GridCell>> = HashMap::new();
-
-    for mut task in all_tasks {
-        let Some(conversation_id) = task.conversation_id.clone().or_else(|| {
-            conversation
-                .as_ref()
-                .map(|conversation| conversation.id.clone())
-        }) else {
-            continue;
-        };
-        task.conversation_id = Some(conversation_id.clone());
-        let grid_size = task
-            .grid_size
-            .or_else(|| {
-                conversations
-                    .iter()
-                    .find(|conversation| conversation.id == conversation_id)
-                    .map(|conversation| conversation.grid_size)
-            })
-            .unwrap_or(project.grid_size);
-        task.grid_size = Some(grid_size);
-        conversation_tasks
-            .entry(grid_run_key(&conversation_id, grid_size))
-            .or_default()
-            .push(task);
-    }
+    let conversation_tasks = read_project_conversation_tasks(&data_dir, &projects, &conversations)?;
 
     let tasks = conversation
         .as_ref()
@@ -693,7 +657,10 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
     } = snapshot;
     migrate_legacy_api_keys(&mut settings)?;
     refresh_api_key_status(&mut settings);
-    upsert_project(&mut projects, project.clone());
+    let has_persisted_projects = !projects.is_empty() || conversation.is_some();
+    if has_persisted_projects {
+        upsert_project(&mut projects, project.clone());
+    }
     if let Some(conversation) = conversation.as_ref() {
         upsert_conversation(&mut conversations, conversation.clone());
     }
@@ -702,15 +669,17 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
             .iter()
             .any(|conversation| conversation.id == *conversation_id)
     });
-    if let Some(active_conversation_id) = active_conversation_id.as_ref() {
-        let active_grid_size = conversation
-            .as_ref()
-            .map(|conversation| conversation.grid_size)
-            .unwrap_or(project.grid_size);
-        conversation_tasks.insert(
-            grid_run_key(active_conversation_id, active_grid_size),
-            tasks,
-        );
+    if has_persisted_projects {
+        if let Some(active_conversation_id) = active_conversation_id.as_ref() {
+            let active_grid_size = conversation
+                .as_ref()
+                .map(|conversation| conversation.grid_size)
+                .unwrap_or(project.grid_size);
+            conversation_tasks.insert(
+                grid_run_key(active_conversation_id, active_grid_size),
+                tasks,
+            );
+        }
     }
     let project_files_projects = projects.clone();
     let project_files_conversations = conversations.clone();
@@ -721,202 +690,41 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
         .lock()
         .map_err(|_| "Database lock is poisoned".to_string())?;
     let previous_projects = read_projects(&connection)?;
+    let current_project_ids = projects
+        .iter()
+        .map(|project| project.id.as_str())
+        .collect::<HashSet<_>>();
+    let removed_projects = previous_projects
+        .iter()
+        .filter(|project| !current_project_ids.contains(project.id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
     let now = project.updated_at.clone();
 
     for project in &projects {
-        transaction
-            .execute(
-                "
-                INSERT INTO projects (
-                    id, title, project_directory, original_prompt, style, grid_size, aspect_ratio,
-                    quality, output_size, schema_version, created_at, updated_at
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-                ON CONFLICT(id) DO UPDATE SET
-                    title = excluded.title,
-                    project_directory = excluded.project_directory,
-                    original_prompt = excluded.original_prompt,
-                    style = excluded.style,
-                    grid_size = excluded.grid_size,
-                    aspect_ratio = excluded.aspect_ratio,
-                    quality = excluded.quality,
-                    output_size = excluded.output_size,
-                    schema_version = excluded.schema_version,
-                    updated_at = excluded.updated_at
-                ",
-                params![
-                    &project.id,
-                    &project.title,
-                    &project.project_directory,
-                    &project.original_prompt,
-                    &project.style,
-                    project.grid_size,
-                    &project.aspect_ratio,
-                    &project.quality,
-                    &project.output_size,
-                    project.schema_version,
-                    &project.created_at,
-                    &project.updated_at,
-                ],
-            )
-            .map_err(|error| error.to_string())?;
+        write_project_record(&transaction, project)?;
     }
 
-    for conversation in &conversations {
+    for removed_project in &removed_projects {
+        write_removed_project_record(&transaction, removed_project, &now)?;
         transaction
             .execute(
-                "
-                INSERT INTO conversations (
-                    id, project_id, title, original_prompt, style, grid_size,
-                    aspect_ratio, quality, output_size, schema_version,
-                    created_at, updated_at, workflow_mode, main_detail, configuration_locked
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
-                ON CONFLICT(id) DO UPDATE SET
-                    project_id = excluded.project_id,
-                    title = excluded.title,
-                    original_prompt = excluded.original_prompt,
-                    style = excluded.style,
-                    grid_size = excluded.grid_size,
-                    aspect_ratio = excluded.aspect_ratio,
-                    quality = excluded.quality,
-                    output_size = excluded.output_size,
-                    schema_version = excluded.schema_version,
-                    workflow_mode = excluded.workflow_mode,
-                    main_detail = excluded.main_detail,
-                    configuration_locked = excluded.configuration_locked,
-                    updated_at = excluded.updated_at
-                ",
-                params![
-                    &conversation.id,
-                    &conversation.project_id,
-                    &conversation.title,
-                    &conversation.original_prompt,
-                    &conversation.style,
-                    conversation.grid_size,
-                    &conversation.aspect_ratio,
-                    &conversation.quality,
-                    &conversation.output_size,
-                    conversation.schema_version,
-                    &conversation.created_at,
-                    &conversation.updated_at,
-                    &conversation.workflow_mode,
-                    conversation
-                        .main_detail
-                        .as_ref()
-                        .map(|value| value.to_string()),
-                    conversation.configuration_locked,
-                ],
+                "DELETE FROM image_tasks WHERE project_id = ?1",
+                params![&removed_project.id],
             )
             .map_err(|error| error.to_string())?;
-    }
-
-    let previous_conversations = read_conversations(&transaction)?;
-    let mut removed_conversation_directories = Vec::new();
-    for previous_conversation in previous_conversations {
-        let Some(previous_project) = projects
-            .iter()
-            .find(|project| project.id == previous_conversation.project_id)
-        else {
-            continue;
-        };
-        if conversations
-            .iter()
-            .any(|conversation| conversation.id == previous_conversation.id)
-        {
-            continue;
-        }
-
-        removed_conversation_directories.push(conversation_directory(
-            store,
-            previous_project,
-            &previous_conversation,
-        )?);
         transaction
             .execute(
-                "DELETE FROM conversations WHERE id = ?1",
-                params![previous_conversation.id],
+                "DELETE FROM conversations WHERE project_id = ?1",
+                params![&removed_project.id],
             )
             .map_err(|error| error.to_string())?;
-    }
-    transaction
-        .execute("DELETE FROM image_tasks", [])
-        .map_err(|error| error.to_string())?;
-
-    let conversation_project_lookup = conversations
-        .iter()
-        .map(|conversation| (conversation.id.clone(), conversation.project_id.clone()))
-        .collect::<HashMap<_, _>>();
-
-    {
-        let mut task_insert = transaction
-            .prepare(
-                "
-                INSERT INTO image_tasks (
-                    id, project_id, conversation_id, grid_size, parent_task_id, exploration_round, cell_index,
-                    prompt, direction_title, status, image_path, error_message, provider, model,
-                    created_at, updated_at, attempt, visual_title, visual_palette,
-                    visual_texture, role, reference_images, depends_on_task_id
-                )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
-                ",
-            )
+        transaction
+            .execute("DELETE FROM projects WHERE id = ?1", params![&removed_project.id])
             .map_err(|error| error.to_string())?;
-
-        for (task_key, tasks) in conversation_tasks {
-            let conversation_id = conversation_id_from_task_key(&task_key);
-            let Some(task_project_id) = conversation_project_lookup.get(&conversation_id).cloned()
-            else {
-                continue;
-            };
-
-            for mut task in tasks {
-                let palette = serde_json::to_string(&task.visual.palette)
-                    .map_err(|error| error.to_string())?;
-                let reference_images = serde_json::to_string(&task.reference_images)
-                    .map_err(|error| error.to_string())?;
-                let task_conversation_id = task
-                    .conversation_id
-                    .take()
-                    .unwrap_or_else(|| conversation_id.clone());
-                let task_project_id = if task.project_id.is_empty() {
-                    task_project_id.clone()
-                } else {
-                    task.project_id
-                };
-
-                task_insert
-                    .execute(params![
-                        task.id,
-                        task_project_id,
-                        task_conversation_id,
-                        task.grid_size,
-                        task.parent_task_id,
-                        task.exploration_round,
-                        task.index,
-                        task.prompt,
-                        task.direction_title,
-                        task.status,
-                        task.image_path,
-                        task.error_message,
-                        task.provider,
-                        task.model,
-                        task.created_at,
-                        task.updated_at,
-                        task.attempt,
-                        task.visual.title,
-                        palette,
-                        task.visual.texture,
-                        task.role,
-                        reference_images,
-                        task.depends_on_task_id,
-                    ])
-                    .map_err(|error| error.to_string())?;
-            }
-        }
     }
 
     let settings_json = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
@@ -949,7 +757,11 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
                 updated_at = excluded.updated_at
             ",
             params![
-                &project.id,
+                if has_persisted_projects {
+                    Some(project.id.as_str())
+                } else {
+                    None
+                },
                 active_conversation_id,
                 selected_task_id,
                 current_round,
@@ -958,26 +770,78 @@ pub fn save_workspace(store: &LocalStore, snapshot: AppSnapshot) -> Result<(), S
         )
         .map_err(|error| error.to_string())?;
 
-    for removed_directory in &removed_conversation_directories {
-        match fs::remove_dir_all(&removed_directory) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(format!(
-                    "Could not delete conversation folder {}: {error}",
-                    path_to_display_string(&removed_directory)
-                ));
-            }
-        }
-    }
     transaction.commit().map_err(|error| error.to_string())?;
     rename_default_project_folders(store, &previous_projects, &project_files_projects)?;
+    sync_project_databases(
+        store,
+        &project_files_projects,
+        &project_files_conversations,
+        &project_files_tasks,
+    )?;
     sync_project_files(
         store,
         &project_files_projects,
         &project_files_conversations,
         &project_files_tasks,
     )
+}
+
+pub fn open_project_directory(
+    store: &LocalStore,
+    directory: &str,
+    opened_at: &str,
+) -> Result<AppSnapshot, String> {
+    let opened_at = opened_at.trim();
+    if opened_at.is_empty() {
+        return Err("Project open time cannot be empty".to_string());
+    }
+
+    let project_directory = validate_project_directory(directory)?;
+    let project = match read_json_file::<Project>(&project_directory.join("project.json"))? {
+        Some(mut project) => {
+            project.project_directory = Some(path_to_display_string(&project_directory));
+            project
+        }
+        None => create_project_for_directory(&project_directory, opened_at)?,
+    };
+
+    ensure_project_layout_at_path(&project_directory, &project)?;
+    let project_connection = Connection::open(project_directory.join(PROJECT_DATABASE_FILE_NAME))
+        .map_err(|error| format!("Could not open project database: {error}"))?;
+    migrate_project_database(&project_connection).map_err(|error| error.to_string())?;
+    write_project_state(&project_connection, &project)?;
+
+    {
+        let mut connection = store
+            .connection
+            .lock()
+            .map_err(|_| "Database lock is poisoned".to_string())?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        write_project_record(&transaction, &project)?;
+        transaction
+            .execute(
+                "
+                INSERT INTO app_state (
+                    id, selected_project_id, selected_conversation_id,
+                    selected_task_id, current_round, updated_at
+                )
+                VALUES (1, ?1, NULL, NULL, 1, ?2)
+                ON CONFLICT(id) DO UPDATE SET
+                    selected_project_id = excluded.selected_project_id,
+                    selected_conversation_id = NULL,
+                    selected_task_id = NULL,
+                    current_round = 1,
+                    updated_at = excluded.updated_at
+                ",
+                params![&project.id, opened_at],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+    }
+
+    load_workspace(store)?.ok_or_else(|| "Could not load opened project".to_string())
 }
 
 pub fn save_generated_image(
@@ -998,9 +862,8 @@ pub fn save_generated_image(
     let image_directory = project_directory
         .join("conversations")
         .join(sanitize_path_component(&request.conversation_id))
-        .join("grid-runs")
-        .join(format!("grid-{}", request.grid_size.max(1)))
-        .join("images");
+        .join("images")
+        .join(format!("grid-{}", request.grid_size.max(1)));
     fs::create_dir_all(&image_directory)
         .map_err(|error| format!("Could not create image folder: {error}"))?;
 
@@ -1075,6 +938,13 @@ pub fn project_directory(
         resolve_project_directory(&data_dir, project_id, project_title, project_directory)?;
     fs::create_dir_all(&project_directory)
         .map_err(|error| format!("Could not create project folder: {error}"))?;
+    fs::create_dir_all(project_directory.join("conversations"))
+        .map_err(|error| format!("Could not create conversations folder: {error}"))?;
+    fs::create_dir_all(project_directory.join("assets"))
+        .map_err(|error| format!("Could not create project assets folder: {error}"))?;
+    let connection = Connection::open(project_directory.join(PROJECT_DATABASE_FILE_NAME))
+        .map_err(|error| format!("Could not open project database: {error}"))?;
+    migrate_project_database(&connection).map_err(|error| error.to_string())?;
 
     Ok(project_directory)
 }
@@ -1094,13 +964,21 @@ pub fn rename_conversation(
         return Err("Conversation updated time cannot be empty".to_string());
     }
 
-    let mut connection = store
+    let mut global_connection = store
         .connection
         .lock()
         .map_err(|_| "Database lock is poisoned".to_string())?;
-    let conversation = read_conversation_by_id(&connection, conversation_id)?
+    let project = find_project_for_conversation(store, &global_connection, conversation_id)?
         .ok_or_else(|| "Conversation was not found".to_string())?;
-    let duplicate_title = connection
+    let data_dir = store
+        .data_dir
+        .lock()
+        .map_err(|_| "Storage path lock is poisoned".to_string())?
+        .clone();
+    let mut project_connection = open_project_database(&data_dir, &project)?;
+    let conversation = read_conversation_by_id(&project_connection, conversation_id)?
+        .ok_or_else(|| "Conversation was not found".to_string())?;
+    let duplicate_title = project_connection
         .query_row(
             "
             SELECT 1
@@ -1120,7 +998,7 @@ pub fn rename_conversation(
         return Err("Conversation title already exists in this project".to_string());
     }
 
-    let transaction = connection
+    let transaction = project_connection
         .transaction()
         .map_err(|error| error.to_string())?;
     transaction
@@ -1133,20 +1011,13 @@ pub fn rename_conversation(
             params![title, updated_at, conversation_id],
         )
         .map_err(|error| error.to_string())?;
-    transaction
-        .execute(
-            "
-            UPDATE projects
-            SET updated_at = ?1
-            WHERE id = ?2
-            ",
-            params![updated_at, &conversation.project_id],
-        )
-        .map_err(|error| error.to_string())?;
     transaction.commit().map_err(|error| error.to_string())?;
 
-    let renamed_conversation = read_conversation_by_id(&connection, conversation_id)?;
-    let project = read_project_by_id(&connection, &conversation.project_id)?;
+    let renamed_conversation = read_conversation_by_id(&project_connection, conversation_id)?;
+    let project = update_project_updated_at(&mut global_connection, &project.id, updated_at)?;
+    if let (Some(project), Some(conversation)) = (project.as_ref(), renamed_conversation.as_ref()) {
+        write_conversation_manifest(store, project, conversation)?;
+    }
 
     Ok(ConversationMutationResult {
         conversation: renamed_conversation,
@@ -1164,17 +1035,23 @@ pub fn delete_conversation(
         return Err("Conversation updated time cannot be empty".to_string());
     }
 
-    let mut connection = store
+    let mut global_connection = store
         .connection
         .lock()
         .map_err(|_| "Database lock is poisoned".to_string())?;
-    let conversation = read_conversation_by_id(&connection, conversation_id)?
+    let project = find_project_for_conversation(store, &global_connection, conversation_id)?
         .ok_or_else(|| "Conversation was not found".to_string())?;
-    let project = read_project_by_id(&connection, &conversation.project_id)?
-        .ok_or_else(|| "Project was not found".to_string())?;
+    let data_dir = store
+        .data_dir
+        .lock()
+        .map_err(|_| "Storage path lock is poisoned".to_string())?
+        .clone();
+    let mut project_connection = open_project_database(&data_dir, &project)?;
+    let conversation = read_conversation_by_id(&project_connection, conversation_id)?
+        .ok_or_else(|| "Conversation was not found".to_string())?;
     let conversation_directory = conversation_directory(store, &project, &conversation)?;
 
-    let transaction = connection
+    let transaction = project_connection
         .transaction()
         .map_err(|error| error.to_string())?;
     transaction
@@ -1203,30 +1080,6 @@ pub fn delete_conversation(
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    transaction
-        .execute(
-            "
-            UPDATE app_state
-            SET selected_conversation_id = ?1,
-                selected_task_id = NULL,
-                current_round = 1,
-                updated_at = ?2
-            WHERE selected_conversation_id = ?3
-            ",
-            params![&next_conversation_id, updated_at, conversation_id],
-        )
-        .map_err(|error| error.to_string())?;
-    transaction
-        .execute(
-            "
-            UPDATE projects
-            SET updated_at = ?1
-            WHERE id = ?2
-            ",
-            params![updated_at, &conversation.project_id],
-        )
-        .map_err(|error| error.to_string())?;
-
     let deleted_directory = if conversation_directory.exists() {
         fs::remove_dir_all(&conversation_directory).map_err(|error| {
             format!(
@@ -1248,10 +1101,23 @@ pub fn delete_conversation(
 
     let next_conversation = next_conversation_id
         .as_deref()
-        .map(|id| read_conversation_by_id(&connection, id))
+        .map(|id| read_conversation_by_id(&project_connection, id))
         .transpose()?
         .flatten();
-    let project = read_project_by_id(&connection, &conversation.project_id)?;
+    let project = update_project_updated_at(&mut global_connection, &conversation.project_id, updated_at)?;
+    global_connection
+        .execute(
+            "
+            UPDATE app_state
+            SET selected_conversation_id = ?1,
+                selected_task_id = NULL,
+                current_round = 1,
+                updated_at = ?2
+            WHERE selected_conversation_id = ?3
+            ",
+            params![&next_conversation_id, updated_at, conversation_id],
+        )
+        .map_err(|error| error.to_string())?;
 
     Ok(ConversationMutationResult {
         conversation: next_conversation,
@@ -1373,6 +1239,467 @@ fn sync_project_files(
     Ok(())
 }
 
+fn sync_project_databases(
+    store: &LocalStore,
+    projects: &[Project],
+    conversations: &[Conversation],
+    conversation_tasks: &HashMap<String, Vec<GridCell>>,
+) -> Result<(), String> {
+    let data_dir = store
+        .data_dir
+        .lock()
+        .map_err(|_| "Storage path lock is poisoned".to_string())?
+        .clone();
+
+    for project in projects {
+        ensure_project_layout(&data_dir, project)?;
+        let mut connection = open_project_database(&data_dir, project)?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        write_project_state(&transaction, project)?;
+        transaction
+            .execute("DELETE FROM image_tasks", [])
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute("DELETE FROM conversations", [])
+            .map_err(|error| error.to_string())?;
+
+        for conversation in conversations
+            .iter()
+            .filter(|conversation| conversation.project_id == project.id)
+        {
+            write_conversation_record(&transaction, conversation)?;
+            transaction
+                .execute(
+                    "
+                    INSERT INTO grid_runs (
+                        id, conversation_id, grid_size, created_at, updated_at
+                    )
+                    VALUES (?1, ?2, ?3, ?4, ?5)
+                    ON CONFLICT(id) DO UPDATE SET
+                        conversation_id = excluded.conversation_id,
+                        grid_size = excluded.grid_size,
+                        updated_at = excluded.updated_at
+                    ",
+                    params![
+                        grid_run_key(&conversation.id, conversation.grid_size),
+                        &conversation.id,
+                        conversation.grid_size,
+                        &conversation.created_at,
+                        &conversation.updated_at,
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+
+        let project_conversation_ids = conversations
+            .iter()
+            .filter(|conversation| conversation.project_id == project.id)
+            .map(|conversation| conversation.id.as_str())
+            .collect::<HashSet<_>>();
+        let mut seen_task_ids = HashSet::new();
+        for (task_key, tasks) in conversation_tasks {
+            let conversation_id = conversation_id_from_task_key(task_key);
+            if !project_conversation_ids.contains(conversation_id.as_str()) {
+                continue;
+            }
+
+            for task in tasks {
+                if !seen_task_ids.insert(task.id.clone()) {
+                    continue;
+                }
+                let mut task = task.clone();
+                if task.project_id.is_empty() {
+                    task.project_id = project.id.clone();
+                }
+                if task.conversation_id.is_none() {
+                    task.conversation_id = Some(conversation_id.clone());
+                }
+                write_task_record(&transaction, task)?;
+            }
+        }
+
+        transaction.commit().map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn read_project_conversations(
+    data_dir: &Path,
+    projects: &[Project],
+) -> Result<Vec<Conversation>, String> {
+    let mut conversations = Vec::new();
+    for project in projects {
+        let connection = open_project_database(data_dir, project)?;
+        let mut project_conversations = read_conversations(&connection)?;
+        for conversation in &mut project_conversations {
+            conversation.project_id = project.id.clone();
+        }
+        conversations.extend(project_conversations);
+    }
+
+    Ok(conversations)
+}
+
+fn read_project_conversation_tasks(
+    data_dir: &Path,
+    projects: &[Project],
+    conversations: &[Conversation],
+) -> Result<HashMap<String, Vec<GridCell>>, String> {
+    let mut conversation_tasks: HashMap<String, Vec<GridCell>> = HashMap::new();
+    let conversation_grid_sizes = conversations
+        .iter()
+        .map(|conversation| (conversation.id.clone(), conversation.grid_size))
+        .collect::<HashMap<_, _>>();
+
+    for project in projects {
+        let connection = open_project_database(data_dir, project)?;
+        let mut task_statement = connection
+            .prepare(
+                "
+                SELECT id, project_id, conversation_id, parent_task_id, exploration_round, cell_index,
+                       prompt, direction_title, status, image_path, error_message, provider, model,
+                       created_at, updated_at, attempt, visual_title, visual_palette,
+                       visual_texture, role, reference_images, depends_on_task_id, grid_size
+                FROM image_tasks
+                ORDER BY conversation_id, exploration_round, cell_index
+                ",
+            )
+            .map_err(|error| error.to_string())?;
+
+        let task_rows = task_statement
+            .query_map([], read_task)
+            .map_err(|error| error.to_string())?;
+        let all_tasks = task_rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+
+        for mut task in all_tasks {
+            let Some(conversation_id) = task.conversation_id.clone() else {
+                continue;
+            };
+            task.project_id = project.id.clone();
+            let grid_size = task
+                .grid_size
+                .or_else(|| conversation_grid_sizes.get(&conversation_id).copied())
+                .unwrap_or(project.grid_size);
+            task.grid_size = Some(grid_size);
+            conversation_tasks
+                .entry(grid_run_key(&conversation_id, grid_size))
+                .or_default()
+                .push(task);
+        }
+    }
+
+    Ok(conversation_tasks)
+}
+
+fn validate_project_directory(directory: &str) -> Result<PathBuf, String> {
+    let trimmed = directory.trim();
+    if trimmed.is_empty() {
+        return Err("Project folder path cannot be empty".to_string());
+    }
+
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return Err("Project folder must be an absolute path".to_string());
+    }
+    if !path.exists() {
+        return Err("Project folder was not found".to_string());
+    }
+    if !path.is_dir() {
+        return Err("Project path must be a folder".to_string());
+    }
+
+    Ok(path)
+}
+
+fn create_project_for_directory(project_directory: &Path, created_at: &str) -> Result<Project, String> {
+    let project_id_suffix = chrono_like_timestamp();
+    let title = project_directory
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Untitled Project")
+        .to_string();
+
+    Ok(Project {
+        id: format!("project-{project_id_suffix}"),
+        title,
+        project_directory: Some(path_to_display_string(project_directory)),
+        original_prompt: String::new(),
+        style: "editorial product concept, refined composition, cinematic light".to_string(),
+        grid_size: 9,
+        aspect_ratio: "1:1".to_string(),
+        quality: "draft".to_string(),
+        output_size: default_output_size(),
+        schema_version: 1,
+        created_at: created_at.to_string(),
+        updated_at: created_at.to_string(),
+    })
+}
+
+fn ensure_project_layout_at_path(
+    project_directory: &Path,
+    project: &Project,
+) -> Result<(), String> {
+    fs::create_dir_all(project_directory)
+        .map_err(|error| format!("Could not create project folder: {error}"))?;
+    fs::create_dir_all(project_directory.join("conversations"))
+        .map_err(|error| format!("Could not create conversations folder: {error}"))?;
+    fs::create_dir_all(project_directory.join("assets"))
+        .map_err(|error| format!("Could not create project assets folder: {error}"))?;
+    write_json_file(&project_directory.join("project.json"), project)
+}
+
+fn write_project_state(connection: &Connection, project: &Project) -> Result<(), String> {
+    connection
+        .execute(
+            "
+            INSERT INTO project_state (key, value, updated_at)
+            VALUES ('project', ?1, ?2)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            ",
+            params![
+                serde_json::to_string(project).map_err(|error| error.to_string())?,
+                &project.updated_at,
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn read_removed_project_ids(connection: &Connection) -> Result<HashSet<String>, String> {
+    let mut statement = connection
+        .prepare("SELECT id FROM removed_projects")
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?;
+
+    rows.collect::<Result<HashSet<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn find_project_for_conversation(
+    store: &LocalStore,
+    global_connection: &Connection,
+    conversation_id: &str,
+) -> Result<Option<Project>, String> {
+    let data_dir = store
+        .data_dir
+        .lock()
+        .map_err(|_| "Storage path lock is poisoned".to_string())?
+        .clone();
+    let projects = read_projects(global_connection)?;
+    for project in projects {
+        let connection = open_project_database(&data_dir, &project)?;
+        if read_conversation_by_id(&connection, conversation_id)?.is_some() {
+            return Ok(Some(project));
+        }
+    }
+
+    Ok(None)
+}
+
+fn update_project_updated_at(
+    connection: &mut Connection,
+    project_id: &str,
+    updated_at: &str,
+) -> Result<Option<Project>, String> {
+    connection
+        .execute(
+            "
+            UPDATE projects
+            SET updated_at = ?1
+            WHERE id = ?2
+            ",
+            params![updated_at, project_id],
+        )
+        .map_err(|error| error.to_string())?;
+    read_project_by_id(connection, project_id)
+}
+
+fn write_conversation_manifest(
+    store: &LocalStore,
+    project: &Project,
+    conversation: &Conversation,
+) -> Result<(), String> {
+    let conversation_directory = conversation_directory(store, project, conversation)?;
+    fs::create_dir_all(&conversation_directory)
+        .map_err(|error| format!("Could not create conversation folder: {error}"))?;
+    write_json_file(
+        &conversation_directory.join("conversation.json"),
+        conversation,
+    )
+}
+
+fn open_project_database(data_dir: &Path, project: &Project) -> Result<Connection, String> {
+    let project_directory = ensure_project_layout(data_dir, project)?;
+    let connection = Connection::open(project_directory.join(PROJECT_DATABASE_FILE_NAME))
+        .map_err(|error| format!("Could not open project database: {error}"))?;
+    migrate_project_database(&connection).map_err(|error| error.to_string())?;
+
+    Ok(connection)
+}
+
+fn ensure_project_layout(data_dir: &Path, project: &Project) -> Result<PathBuf, String> {
+    let project_directory = resolve_project_directory(
+        data_dir,
+        &project.id,
+        &project.title,
+        project.project_directory.as_deref(),
+    )?;
+    fs::create_dir_all(project_directory.join("conversations"))
+        .map_err(|error| format!("Could not create conversations folder: {error}"))?;
+    fs::create_dir_all(project_directory.join("assets"))
+        .map_err(|error| format!("Could not create project assets folder: {error}"))?;
+    write_json_file(&project_directory.join("project.json"), project)?;
+
+    Ok(project_directory)
+}
+
+fn migrate_project_database(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        "
+        PRAGMA foreign_keys = ON;
+
+        CREATE TABLE IF NOT EXISTS project_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS conversations (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            original_prompt TEXT NOT NULL,
+            style TEXT NOT NULL,
+            grid_size INTEGER NOT NULL,
+            aspect_ratio TEXT NOT NULL,
+            quality TEXT NOT NULL,
+            output_size TEXT NOT NULL DEFAULT 'standard',
+            schema_version INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            workflow_mode TEXT,
+            main_detail TEXT,
+            configuration_locked INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS grid_runs (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            grid_size INTEGER NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS image_tasks (
+            id TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            conversation_id TEXT,
+            grid_size INTEGER,
+            parent_task_id TEXT,
+            exploration_round INTEGER NOT NULL,
+            cell_index INTEGER NOT NULL,
+            prompt TEXT NOT NULL,
+            direction_title TEXT,
+            status TEXT NOT NULL,
+            image_path TEXT,
+            error_message TEXT,
+            provider TEXT NOT NULL,
+            model TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            visual_title TEXT NOT NULL,
+            visual_palette TEXT NOT NULL,
+            visual_texture TEXT NOT NULL,
+            role TEXT,
+            reference_images TEXT,
+            depends_on_task_id TEXT,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS image_outputs (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            task_id TEXT NOT NULL,
+            attempt INTEGER NOT NULL,
+            image_path TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+            FOREIGN KEY(task_id) REFERENCES image_tasks(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS reference_images (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            image_path TEXT NOT NULL,
+            role TEXT,
+            name TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS conversation_messages (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS generation_logs (
+            id TEXT PRIMARY KEY,
+            conversation_id TEXT NOT NULL,
+            task_id TEXT,
+            event_type TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_project_conversations_updated
+            ON conversations(updated_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_project_tasks_conversation_round
+            ON image_tasks(conversation_id, exploration_round, cell_index);
+
+        PRAGMA user_version = 1;
+        ",
+    )?;
+    ensure_column(
+        connection,
+        "conversations",
+        "output_size",
+        "TEXT NOT NULL DEFAULT 'standard'",
+    )?;
+    ensure_column(connection, "conversations", "workflow_mode", "TEXT")?;
+    ensure_column(connection, "conversations", "main_detail", "TEXT")?;
+    ensure_column(
+        connection,
+        "conversations",
+        "configuration_locked",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    ensure_column(connection, "image_tasks", "direction_title", "TEXT")?;
+    ensure_column(connection, "image_tasks", "conversation_id", "TEXT")?;
+    ensure_column(connection, "image_tasks", "grid_size", "INTEGER")?;
+    ensure_column(connection, "image_tasks", "role", "TEXT")?;
+    ensure_column(connection, "image_tasks", "reference_images", "TEXT")?;
+    ensure_column(connection, "image_tasks", "depends_on_task_id", "TEXT")?;
+    connection.pragma_update(None, "user_version", 1)
+}
+
 fn conversation_directory(
     store: &LocalStore,
     project: &Project,
@@ -1424,12 +1751,30 @@ fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     })
 }
 
+fn read_json_file<T>(path: &Path) -> Result<Option<T>, String>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    match fs::read_to_string(path) {
+        Ok(json) => serde_json::from_str::<T>(&json)
+            .map(Some)
+            .map_err(|error| format!("Could not parse project file {}: {error}", path_to_display_string(path))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "Could not read project file {}: {error}",
+            path_to_display_string(path)
+        )),
+    }
+}
+
 fn resolve_project_directory(
     data_dir: &Path,
     project_id: &str,
     project_title: &str,
     project_directory: Option<&str>,
 ) -> Result<PathBuf, String> {
+    let folder_name = sanitize_path_component(project_title);
+
     if let Some(project_directory) = project_directory
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -1438,14 +1783,99 @@ fn resolve_project_directory(
         if !path.is_absolute() {
             return Err("Project folder must be an absolute path".to_string());
         }
-        return Ok(path);
+        if is_existing_project_directory(&path, project_id) {
+            return Ok(path);
+        }
+        return Ok(path.join(folder_name));
     }
 
-    Ok(data_dir.join("projects").join(format!(
+    Ok(data_dir.join("projects").join(folder_name))
+}
+
+fn resolve_existing_project_directory(
+    data_dir: &Path,
+    project_id: &str,
+    project_title: &str,
+    project_directory: Option<&str>,
+) -> Result<PathBuf, String> {
+    let project_directory_path =
+        resolve_project_directory(data_dir, project_id, project_title, project_directory)?;
+    if project_directory_path.exists() {
+        return Ok(project_directory_path);
+    }
+
+    if project_directory.map(str::trim).unwrap_or("").is_empty() {
+        let legacy_directory = data_dir
+            .join("projects")
+            .join(legacy_project_folder_name(project_id, project_title));
+        if is_existing_project_directory(&legacy_directory, project_id) {
+            return Ok(legacy_directory);
+        }
+        return Ok(project_directory_path);
+    }
+
+    let Some(custom_directory) = project_directory
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(project_directory_path);
+    };
+    let legacy_directory = PathBuf::from(custom_directory);
+    if !legacy_directory.is_absolute() {
+        return Err("Project folder must be an absolute path".to_string());
+    }
+
+    if is_existing_project_directory(&legacy_directory, project_id) {
+        return Ok(legacy_directory);
+    }
+
+    Ok(project_directory_path)
+}
+
+fn is_existing_project_directory(path: &Path, project_id: &str) -> bool {
+    let project_file = path.join("project.json");
+    if !project_file.is_file() {
+        return false;
+    }
+
+    if project_id.trim().is_empty() {
+        return true;
+    }
+
+    fs::read_to_string(project_file)
+        .ok()
+        .and_then(|json| serde_json::from_str::<Project>(&json).ok())
+        .map(|project| project.id == project_id)
+        .unwrap_or(false)
+}
+
+fn legacy_project_folder_name(project_id: &str, project_title: &str) -> String {
+    format!(
         "{}-{}",
-        sanitize_path_component(project_title),
-        sanitize_path_component(project_id)
-    )))
+        legacy_sanitize_path_component(project_title),
+        legacy_sanitize_path_component(project_id)
+    )
+}
+
+fn legacy_sanitize_path_component(value: &str) -> String {
+    let sanitized = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+
+    if sanitized.is_empty() {
+        "untitled".to_string()
+    } else {
+        sanitized
+    }
 }
 
 fn decode_image_data_url(data_url: &str) -> Result<(&'static str, Vec<u8>), String> {
@@ -1575,6 +2005,13 @@ fn migrate(connection: &Connection) -> rusqlite::Result<()> {
             updated_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS removed_projects (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            project_directory TEXT,
+            removed_at TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS app_state (
             id INTEGER PRIMARY KEY CHECK (id = 1),
             selected_project_id TEXT,
@@ -1697,6 +2134,497 @@ fn read_conversations(connection: &Connection) -> Result<Vec<Conversation>, Stri
     Ok(conversations)
 }
 
+fn recover_project_files(store: &LocalStore, connection: &Connection) -> Result<(), String> {
+    let data_dir = store
+        .data_dir
+        .lock()
+        .map_err(|_| "Storage path lock is poisoned".to_string())?
+        .clone();
+    let projects_dir = data_dir.join("projects");
+    if !projects_dir.is_dir() {
+        return Ok(());
+    }
+
+    let mut projects = read_projects(connection)?;
+    let mut conversations = read_conversations(connection)?;
+    let removed_project_ids = read_removed_project_ids(connection)?;
+    let mut recovered_projects = Vec::new();
+    let mut recovered_conversations = Vec::new();
+    let mut recovered_tasks: HashMap<String, Vec<GridCell>> = HashMap::new();
+
+    let entries = fs::read_dir(&projects_dir).map_err(|error| {
+        format!(
+            "Could not read projects folder {}: {error}",
+            path_to_display_string(&projects_dir)
+        )
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let project_directory = entry.path();
+        if !project_directory.is_dir() {
+            continue;
+        }
+
+        let Some(mut project) = read_json_file::<Project>(&project_directory.join("project.json"))?
+        else {
+            continue;
+        };
+        if removed_project_ids.contains(project.id.as_str()) {
+            continue;
+        }
+        project.project_directory = normalize_recovered_project_directory(
+            project.project_directory,
+            &project_directory,
+            &data_dir,
+            &project.title,
+        );
+
+        let project_was_missing = !projects.iter().any(|candidate| candidate.id == project.id);
+        if project_was_missing {
+            upsert_project(&mut projects, project.clone());
+            recovered_projects.push(project.clone());
+        }
+
+        let recovered_project_conversations = recover_project_conversations(
+            &project,
+            &project_directory,
+            project_was_missing,
+            &mut conversations,
+            &mut recovered_tasks,
+        )?;
+        recovered_conversations.extend(recovered_project_conversations);
+    }
+
+    if recovered_projects.is_empty()
+        && recovered_conversations.is_empty()
+        && recovered_tasks.is_empty()
+    {
+        return Ok(());
+    }
+
+    let recovered_project_ids = recovered_projects
+        .iter()
+        .map(|project| project.id.as_str())
+        .chain(
+            recovered_conversations
+                .iter()
+                .map(|conversation| conversation.project_id.as_str()),
+        )
+        .chain(
+            recovered_tasks
+                .keys()
+                .map(|task_key| conversation_id_from_task_key(task_key))
+                .filter_map(|conversation_id| {
+                    recovered_conversations
+                        .iter()
+                        .find(|conversation| conversation.id == conversation_id)
+                        .map(|conversation| conversation.project_id.as_str())
+                }),
+        )
+        .collect::<HashSet<_>>();
+    let recovered_project_records = projects
+        .iter()
+        .filter(|project| recovered_project_ids.contains(project.id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !recovered_project_records.is_empty() {
+        sync_project_databases(
+            store,
+            &recovered_project_records,
+            &recovered_conversations,
+            &recovered_tasks,
+        )?;
+    }
+
+    write_recovered_workspace(
+        connection,
+        &recovered_projects,
+        &recovered_conversations,
+        &recovered_tasks,
+    )
+}
+
+fn recover_project_conversations(
+    project: &Project,
+    project_directory: &Path,
+    project_was_missing: bool,
+    conversations: &mut Vec<Conversation>,
+    recovered_tasks: &mut HashMap<String, Vec<GridCell>>,
+) -> Result<Vec<Conversation>, String> {
+    let conversations_dir = project_directory.join("conversations");
+    if !conversations_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut recovered_conversations = Vec::new();
+    let entries = fs::read_dir(&conversations_dir).map_err(|error| {
+        format!(
+            "Could not read conversations folder {}: {error}",
+            path_to_display_string(&conversations_dir)
+        )
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let conversation_directory = entry.path();
+        if !conversation_directory.is_dir() {
+            continue;
+        }
+
+        let Some(mut conversation) =
+            read_json_file::<Conversation>(&conversation_directory.join("conversation.json"))?
+        else {
+            continue;
+        };
+        conversation.project_id = project.id.clone();
+
+        let conversation_was_missing = !conversations
+            .iter()
+            .any(|candidate| candidate.id == conversation.id);
+        if conversation_was_missing {
+            upsert_conversation(conversations, conversation.clone());
+            recovered_conversations.push(conversation.clone());
+        }
+
+        if project_was_missing || conversation_was_missing {
+            for (task_key, tasks) in recover_conversation_tasks(
+                project,
+                &conversation,
+                &conversation_directory,
+            )? {
+                recovered_tasks.entry(task_key).or_default().extend(tasks);
+            }
+        }
+    }
+
+    Ok(recovered_conversations)
+}
+
+fn recover_conversation_tasks(
+    project: &Project,
+    conversation: &Conversation,
+    conversation_directory: &Path,
+) -> Result<HashMap<String, Vec<GridCell>>, String> {
+    let mut recovered_tasks = HashMap::new();
+    let task_files = collect_task_files(conversation_directory)?;
+
+    for task_file in task_files {
+        let Some(tasks) = read_json_file::<Vec<GridCell>>(&task_file)? else {
+            continue;
+        };
+        let normalized_tasks = tasks
+            .into_iter()
+            .map(|mut task| {
+                task.project_id = project.id.clone();
+                task.conversation_id = Some(conversation.id.clone());
+                task.grid_size = Some(task.grid_size.unwrap_or(conversation.grid_size));
+                task
+            })
+            .collect::<Vec<_>>();
+        let grid_size = normalized_tasks
+            .iter()
+            .find_map(|task| task.grid_size)
+            .unwrap_or(conversation.grid_size);
+        recovered_tasks
+            .entry(grid_run_key(&conversation.id, grid_size))
+            .or_insert(normalized_tasks);
+    }
+
+    Ok(recovered_tasks)
+}
+
+fn collect_task_files(conversation_directory: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut task_files = Vec::new();
+    let root_task_file = conversation_directory.join("tasks.json");
+    if root_task_file.is_file() {
+        task_files.push(root_task_file);
+    }
+
+    let grid_runs_directory = conversation_directory.join("grid-runs");
+    if !grid_runs_directory.is_dir() {
+        return Ok(task_files);
+    }
+
+    let entries = fs::read_dir(&grid_runs_directory).map_err(|error| {
+        format!(
+            "Could not read grid runs folder {}: {error}",
+            path_to_display_string(&grid_runs_directory)
+        )
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let task_file = entry.path().join("tasks.json");
+        if task_file.is_file() {
+            task_files.push(task_file);
+        }
+    }
+
+    Ok(task_files)
+}
+
+fn normalize_recovered_project_directory(
+    project_directory: Option<String>,
+    project_file_directory: &Path,
+    data_dir: &Path,
+    project_title: &str,
+) -> Option<String> {
+    match project_directory {
+        Some(project_directory) => Some(project_directory),
+        None if project_file_directory
+            == data_dir
+                .join("projects")
+                .join(sanitize_path_component(project_title)) =>
+        {
+            None
+        }
+        None => project_file_directory
+            .parent()
+            .map(path_to_display_string)
+            .or_else(|| Some(path_to_display_string(project_file_directory))),
+    }
+}
+
+fn write_recovered_workspace(
+    connection: &Connection,
+    projects: &[Project],
+    conversations: &[Conversation],
+    _conversation_tasks: &HashMap<String, Vec<GridCell>>,
+) -> Result<(), String> {
+    let now = projects
+        .iter()
+        .map(|project| project.updated_at.as_str())
+        .chain(conversations.iter().map(|conversation| conversation.updated_at.as_str()))
+        .max()
+        .unwrap_or("");
+
+    for project in projects {
+        write_project_record(connection, project)?;
+    }
+
+    if let Some(project) = projects
+        .iter()
+        .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
+    {
+        connection
+            .execute(
+                "
+                INSERT INTO app_state (
+                    id, selected_project_id, selected_conversation_id,
+                    selected_task_id, current_round, updated_at
+                )
+                VALUES (1, ?1, ?2, NULL, 1, ?3)
+                ON CONFLICT(id) DO NOTHING
+                ",
+                params![
+                    &project.id,
+                    conversations
+                        .iter()
+                        .filter(|conversation| conversation.project_id == project.id)
+                        .max_by(|left, right| left.updated_at.cmp(&right.updated_at))
+                        .map(|conversation| conversation.id.as_str()),
+                    now,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
+fn write_project_record(connection: &Connection, project: &Project) -> Result<(), String> {
+    connection
+        .execute(
+            "
+            INSERT INTO projects (
+                id, title, project_directory, original_prompt, style, grid_size, aspect_ratio,
+                quality, output_size, schema_version, created_at, updated_at
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                project_directory = excluded.project_directory,
+                original_prompt = excluded.original_prompt,
+                style = excluded.style,
+                grid_size = excluded.grid_size,
+                aspect_ratio = excluded.aspect_ratio,
+                quality = excluded.quality,
+                output_size = excluded.output_size,
+                schema_version = excluded.schema_version,
+                updated_at = excluded.updated_at
+            ",
+            params![
+                &project.id,
+                &project.title,
+                &project.project_directory,
+                &project.original_prompt,
+                &project.style,
+                project.grid_size,
+                &project.aspect_ratio,
+                &project.quality,
+                &project.output_size,
+                project.schema_version,
+                &project.created_at,
+                &project.updated_at,
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute("DELETE FROM removed_projects WHERE id = ?1", params![&project.id])
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn write_removed_project_record(
+    connection: &Connection,
+    project: &Project,
+    removed_at: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "
+            INSERT INTO removed_projects (id, title, project_directory, removed_at)
+            VALUES (?1, ?2, ?3, ?4)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                project_directory = excluded.project_directory,
+                removed_at = excluded.removed_at
+            ",
+            params![
+                &project.id,
+                &project.title,
+                &project.project_directory,
+                removed_at,
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn write_conversation_record(
+    connection: &Connection,
+    conversation: &Conversation,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "
+            INSERT INTO conversations (
+                id, project_id, title, original_prompt, style, grid_size,
+                aspect_ratio, quality, output_size, schema_version,
+                created_at, updated_at, workflow_mode, main_detail, configuration_locked
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+            ON CONFLICT(id) DO UPDATE SET
+                project_id = excluded.project_id,
+                title = excluded.title,
+                original_prompt = excluded.original_prompt,
+                style = excluded.style,
+                grid_size = excluded.grid_size,
+                aspect_ratio = excluded.aspect_ratio,
+                quality = excluded.quality,
+                output_size = excluded.output_size,
+                schema_version = excluded.schema_version,
+                workflow_mode = excluded.workflow_mode,
+                main_detail = excluded.main_detail,
+                configuration_locked = excluded.configuration_locked,
+                updated_at = excluded.updated_at
+            ",
+            params![
+                &conversation.id,
+                &conversation.project_id,
+                &conversation.title,
+                &conversation.original_prompt,
+                &conversation.style,
+                conversation.grid_size,
+                &conversation.aspect_ratio,
+                &conversation.quality,
+                &conversation.output_size,
+                conversation.schema_version,
+                &conversation.created_at,
+                &conversation.updated_at,
+                &conversation.workflow_mode,
+                conversation
+                    .main_detail
+                    .as_ref()
+                    .map(|value| value.to_string()),
+                conversation.configuration_locked,
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn write_task_record(connection: &Connection, mut task: GridCell) -> Result<(), String> {
+    let palette = serde_json::to_string(&task.visual.palette)
+        .map_err(|error| error.to_string())?;
+    let reference_images =
+        serde_json::to_string(&task.reference_images).map_err(|error| error.to_string())?;
+    let task_conversation_id = task.conversation_id.take();
+
+    connection
+        .execute(
+            "
+            INSERT INTO image_tasks (
+                id, project_id, conversation_id, grid_size, parent_task_id, exploration_round, cell_index,
+                prompt, direction_title, status, image_path, error_message, provider, model,
+                created_at, updated_at, attempt, visual_title, visual_palette,
+                visual_texture, role, reference_images, depends_on_task_id
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+            ON CONFLICT(id) DO UPDATE SET
+                project_id = excluded.project_id,
+                conversation_id = excluded.conversation_id,
+                grid_size = excluded.grid_size,
+                parent_task_id = excluded.parent_task_id,
+                exploration_round = excluded.exploration_round,
+                cell_index = excluded.cell_index,
+                prompt = excluded.prompt,
+                direction_title = excluded.direction_title,
+                status = excluded.status,
+                image_path = excluded.image_path,
+                error_message = excluded.error_message,
+                provider = excluded.provider,
+                model = excluded.model,
+                updated_at = excluded.updated_at,
+                attempt = excluded.attempt,
+                visual_title = excluded.visual_title,
+                visual_palette = excluded.visual_palette,
+                visual_texture = excluded.visual_texture,
+                role = excluded.role,
+                reference_images = excluded.reference_images,
+                depends_on_task_id = excluded.depends_on_task_id
+            ",
+            params![
+                task.id,
+                task.project_id,
+                task_conversation_id,
+                task.grid_size,
+                task.parent_task_id,
+                task.exploration_round,
+                task.index,
+                task.prompt,
+                task.direction_title,
+                task.status,
+                task.image_path,
+                task.error_message,
+                task.provider,
+                task.model,
+                task.created_at,
+                task.updated_at,
+                task.attempt,
+                task.visual.title,
+                palette,
+                task.visual.texture,
+                task.role,
+                reference_images,
+                task.depends_on_task_id,
+            ],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn prune_missing_project_folders(
     store: &LocalStore,
     connection: &mut Connection,
@@ -1717,7 +2645,7 @@ fn prune_missing_project_folders(
             continue;
         }
 
-        let project_directory = resolve_project_directory(
+        let project_directory = resolve_existing_project_directory(
             &data_dir,
             &project.id,
             &project.title,
@@ -2094,13 +3022,15 @@ fn sanitize_path_component(value: &str) -> String {
     let sanitized = value
         .chars()
         .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
-                character
-            } else {
-                '-'
+            match character {
+                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '-',
+                character if character.is_control() => '-',
+                character => character,
             }
         })
         .collect::<String>()
+        .trim()
+        .trim_end_matches('.')
         .trim_matches('-')
         .to_string();
 

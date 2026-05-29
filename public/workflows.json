@@ -7,6 +7,8 @@
       "executionStrategy": "matrix_exploration",
       "enabled": true,
       "sortOrder": 10,
+      "styleGroupIds": ["aesthetic-visual", "material-light"],
+      "defaultStyleId": "soft-natural-light",
       "analysisTemplate": "You are a senior visual prompt strategist for AI image generation.\n\nTask:\nTransform the user's idea into {{gridSize}} distinct visual directions for a creative exploration matrix.\n\nReturn strict JSON only:\n{\"conversationTitle\":\"3-8 word title\",\"directions\":[{\"title\":\"2-6 word direction title\",\"prompt\":\"production-ready image generation prompt\"}]}\n\nRules:\n- Return exactly {{gridSize}} directions.\n- Each direction must be visually distinct from the others.\n- Vary composition, setting, lighting, camera perspective, mood, color system, and visual metaphor.\n- Keep the core subject and intent consistent.\n- Do not create minor variations of the same scene.\n- Each prompt must be directly usable by an image model.\n- Do not include markdown, numbering, commentary, or extra keys.\n- {{languageInstruction}}\n\nUser idea:\n{{originalPrompt}}\n\nVisual style:\n{{style}}\n\nAspect ratio:\n{{aspectRatio}}\n\nRender quality:\n{{quality}}\n\nOutput size:\n{{outputSize}}"
     },
     {
@@ -16,6 +18,8 @@
       "executionStrategy": "main_detail_set",
       "enabled": true,
       "sortOrder": 20,
+      "styleGroupIds": ["product-visual-system", "material-light"],
+      "defaultStyleId": "clean-marketplace-system",
       "analysisTemplate": "You are a senior ecommerce visual director and AI image prompt engineer.\n\nTask:\nCreate a coherent ecommerce visual set from the user's product idea.\nThe first direction must be the hero/main image.\nThe remaining {{detailCount}} directions must be product detail images that support the same product identity and sales story.\n\nReturn strict JSON only:\n{\"conversationTitle\":\"3-8 word product visual set title\",\"directions\":[{\"title\":\"2-6 word image role title\",\"prompt\":\"production-ready image generation prompt\"}]}\n\nOutput structure:\n- directions[0]: hero/main image prompt.\n- directions[1..]: detail image prompts.\n- Return exactly {{gridSize}} directions total.\n\nHero image requirements:\n- Present the product as the primary commercial focus.\n- Establish premium visual identity, lighting, composition, and environment.\n- Make the product immediately readable for ecommerce use.\n\nDetail image requirements:\n- Each detail image must explain a different selling point or page section.\n- Cover useful detail roles such as material, function, usage scene, scale, packaging, structure, comparison, atmosphere, or isolated close-up.\n- Maintain the same product identity, color logic, material traits, and brand mood as the hero image.\n- Each detail prompt must clearly reference continuity with the hero image concept.\n\nReference image note:\n{{sourceImageInstruction}}\n{{imageReferencePolicy}}\n\nUser product idea:\n{{originalPrompt}}\n\nVisual style:\n{{style}}\n\nAspect ratio:\n{{aspectRatio}}\n\nRender quality:\n{{quality}}\n\nOutput size:\n{{outputSize}}\n\nRules:\n- Do not include markdown, numbering, commentary, or extra keys.\n- Do not make unrelated campaign concepts.\n- Do not repeat the same detail angle.\n- Prompts must be specific, commercial, and directly usable by an image model.\n- {{languageInstruction}}"
     }
   ]

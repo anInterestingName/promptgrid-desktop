@@ -62,6 +62,16 @@ async fn pick_data_directory() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+async fn open_project_directory(
+    store: State<'_, LocalStore>,
+    directory: String,
+    opened_at: String,
+) -> Result<AppSnapshot, String> {
+    let store = store.inner().clone();
+    run_blocking(move || storage::open_project_directory(&store, &directory, &opened_at)).await
+}
+
+#[tauri::command]
 async fn configure_debug_logging(enabled: bool, retention_days: u64) -> Result<(), String> {
     run_blocking(move || debug_log::configure_debug_logging(enabled, retention_days)).await
 }
@@ -229,6 +239,7 @@ pub fn run() {
             get_storage_info,
             set_data_directory,
             pick_data_directory,
+            open_project_directory,
             configure_debug_logging,
             open_debug_log_folder,
             open_project_folder,

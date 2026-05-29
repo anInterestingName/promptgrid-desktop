@@ -2,6 +2,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {
   AlertTriangle,
   FolderOpen,
+  FolderPlus,
   MoreHorizontal,
   Plus,
   Settings2,
@@ -90,9 +91,15 @@ export function ProjectSidebar() {
   const isConversationSaved = usePromptGridStore(
     (state) => state.isConversationSaved,
   );
+  const isPendingConversationVisible = usePromptGridStore(
+    (state) => state.isPendingConversationVisible,
+  );
   const projects = usePromptGridStore((state) => state.projects);
   const conversations = usePromptGridStore((state) => state.conversations);
   const createProject = usePromptGridStore((state) => state.createProject);
+  const openProjectFromDirectory = usePromptGridStore(
+    (state) => state.openProjectFromDirectory,
+  );
   const startNewConversation = usePromptGridStore(
     (state) => state.startNewConversation,
   );
@@ -175,6 +182,26 @@ export function ProjectSidebar() {
       });
   }
 
+  function handleOpenProjectDirectory() {
+    void pickDataDirectory()
+      .then((folder) => {
+        if (!folder) {
+          return undefined;
+        }
+
+        return openProjectFromDirectory(folder);
+      })
+      .then(() => setProjectFolderError(""))
+      .catch((error) => {
+        const errorMessage = getErrorMessage(error);
+        const message = errorMessage.includes("desktop app")
+          ? t(locale, "openProjectDesktopOnly")
+          : `${t(locale, "openProjectError")}: ${errorMessage}`;
+        setProjectFolderError(message);
+        console.error("Could not open project", error);
+      });
+  }
+
   function openConversationContextMenu(
     event: ReactMouseEvent,
     conversationItem: Conversation,
@@ -219,6 +246,14 @@ export function ProjectSidebar() {
         >
           <Plus size={16} aria-hidden="true" />
           <span>{t(locale, "newProject")}</span>
+        </button>
+        <button
+          className="sidebar-action"
+          type="button"
+          onClick={handleOpenProjectDirectory}
+        >
+          <FolderPlus size={16} aria-hidden="true" />
+          <span>{t(locale, "openProject")}</span>
         </button>
       </div>
 
@@ -310,7 +345,9 @@ export function ProjectSidebar() {
               </div>
               {!collapsedProjectIds.has(item.project.id) ? (
                 <div className="conversation-branch">
-                  {!isConversationSaved && item.project.id === project.id ? (
+                  {!isConversationSaved &&
+                  isPendingConversationVisible &&
+                  item.project.id === project.id ? (
                     <PendingConversationButton
                       conversation={conversation}
                       locale={locale}
@@ -377,6 +414,7 @@ export function ProjectSidebar() {
       <NewProjectDialog
         locale={locale}
         open={isProjectDialogOpen}
+        projects={projects}
         onOpenChange={setIsProjectDialogOpen}
         onCreate={(input) => {
           createProject(input);
@@ -462,16 +500,26 @@ export function ProjectSidebar() {
 function NewProjectDialog({
   locale,
   open,
+  projects,
   onOpenChange,
   onCreate,
 }: {
   locale: Locale;
   open: boolean;
+  projects: Project[];
   onOpenChange: (open: boolean) => void;
   onCreate: (input: { title: string; projectDirectory?: string }) => void;
 }) {
   const [title, setTitle] = useState("");
   const [projectDirectory, setProjectDirectory] = useState("");
+  const trimmedTitle = title.trim();
+  const hasDuplicateTitle =
+    Boolean(trimmedTitle) &&
+    projects.some(
+      (candidate) =>
+        candidate.title.trim().toLocaleLowerCase() ===
+        trimmedTitle.toLocaleLowerCase(),
+    );
 
   async function chooseFolder() {
     const folder = await pickDataDirectory();
@@ -505,6 +553,9 @@ function NewProjectDialog({
               value={title}
               onChange={(event) => setTitle(event.target.value)}
             />
+            {hasDuplicateTitle ? (
+              <p className="settings-error">{t(locale, "projectAlreadyExists")}</p>
+            ) : null}
           </label>
           <label className="settings-field">
             <span>{t(locale, "projectFolder")}</span>
@@ -523,11 +574,13 @@ function NewProjectDialog({
             <p className="settings-help">{t(locale, "projectFolderHint")}</p>
           </label>
           <DialogActions
+            isCreateDisabled={hasDuplicateTitle}
             locale={locale}
             onCancel={() => onOpenChange(false)}
             onCreate={() =>
+              !hasDuplicateTitle &&
               onCreate({
-                title: title.trim() || t(locale, "untitledProject"),
+                title: trimmedTitle,
                 projectDirectory: projectDirectory.trim() || undefined,
               })
             }
@@ -731,12 +784,14 @@ function DialogHeader({ locale, title }: { locale: Locale; title: string }) {
 function DialogActions({
   actionClassName = "primary-action",
   actionLabel,
+  isCreateDisabled = false,
   locale,
   onCancel,
   onCreate,
 }: {
   actionClassName?: string;
   actionLabel?: string;
+  isCreateDisabled?: boolean;
   locale: Locale;
   onCancel: () => void;
   onCreate: () => void;
@@ -746,7 +801,12 @@ function DialogActions({
       <button className="secondary-action compact-action" type="button" onClick={onCancel}>
         {t(locale, "cancel")}
       </button>
-      <button className={`${actionClassName} compact-action`} type="button" onClick={onCreate}>
+      <button
+        className={`${actionClassName} compact-action`}
+        disabled={isCreateDisabled}
+        type="button"
+        onClick={onCreate}
+      >
         {actionLabel ?? t(locale, "create")}
       </button>
     </div>

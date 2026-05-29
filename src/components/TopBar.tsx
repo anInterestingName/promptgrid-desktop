@@ -16,21 +16,29 @@ export function TopBar() {
   const isConversationSaved = usePromptGridStore(
     (state) => state.isConversationSaved,
   );
+  const isPendingConversationVisible = usePromptGridStore(
+    (state) => state.isPendingConversationVisible,
+  );
   const eyebrowKey =
     activeSection === "settings" ? "localConfiguration" : "localProject";
   const title =
     activeSection === "settings"
       ? t(locale, "settingsTitle")
       : project.title;
+  const projectSubtitle = isConversationSaved
+    ? conversation.title
+    : isPendingConversationVisible
+      ? t(locale, "newConversation")
+      : undefined;
 
   return (
     <header className="topbar">
       <div>
         <p className="eyebrow">{t(locale, eyebrowKey)}</p>
         <h1>{title}</h1>
-        {activeSection === "projects" ? (
+        {activeSection === "projects" && projectSubtitle ? (
           <p className="topbar-subtitle">
-            {isConversationSaved ? conversation.title : t(locale, "newConversation")}
+            {projectSubtitle}
           </p>
         ) : null}
       </div>

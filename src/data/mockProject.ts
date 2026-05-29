@@ -7,6 +7,7 @@ import type {
   Project,
 } from "../types";
 import { fallbackWorkflowConfigs } from "../modules/workflows/workflowConfig";
+import { defaultStyleId, getStylePrompt } from "../modules/styles/styleCatalog";
 
 const now = new Date().toISOString();
 
@@ -15,7 +16,7 @@ export const mockProject: Project = {
   title: "Launch Cover Directions",
   originalPrompt:
     "A desktop workspace for comparing nine AI image directions for a new product launch.",
-  style: "Editorial product study",
+  style: defaultStyleId,
   gridSize: 9,
   aspectRatio: "1:1",
   quality: "draft",
@@ -131,13 +132,6 @@ export const mockSettings: AppSettings = {
   defaultAspectRatio: "1:1",
 };
 
-export const styleOptions = [
-  "Editorial product study",
-  "Quiet cinematic still",
-  "Premium ecommerce scene",
-  "Magazine cover concept",
-];
-
 export const aspectRatioOptions = ["1:1", "16:9", "9:16", "4:3"] as const;
 
 export const qualityOptions = ["draft", "standard", "high"] as const;
@@ -232,7 +226,7 @@ export function createMockTasks(
     parentTaskId,
     explorationRound,
     index,
-    prompt: `${seedPrompt} - ${direction}. Style: ${project.style}.`,
+    prompt: `${seedPrompt} - ${direction}. Style: ${getStylePrompt(project.style)}.`,
     status: "pending",
     provider: "mock-local",
     model: "mock-image-v1",

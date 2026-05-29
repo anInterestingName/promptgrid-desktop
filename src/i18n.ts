@@ -32,6 +32,7 @@ const messages = {
     recentConversations: "Recent Conversations",
     conversations: "Conversations",
     newProject: "New Project",
+    openProject: "Open Project",
     newConversation: "New Chat",
     projectActions: "Project actions",
     conversationActions: "Chat actions",
@@ -41,6 +42,8 @@ const messages = {
     openProjectFolderError: "Could not open project folder",
     openProjectFolderRestartRequired:
       "Desktop runtime needs to be restarted to load this command.",
+    openProjectDesktopOnly: "Open Project is only available in the desktop app.",
+    openProjectError: "Could not open project",
     rename: "Rename",
     renameProject: "Rename Project",
     renameConversation: "Rename Chat",
@@ -55,11 +58,11 @@ const messages = {
     projectName: "Project name",
     conversationName: "Chat name",
     parentProject: "Project",
-    projectFolder: "Project folder",
+    projectFolder: "Project library folder",
     chooseFolder: "Choose folder",
     defaultProjectFolder: "Default project library",
     projectFolderHint:
-      "Generated images, exports, and project metadata will be stored in this folder.",
+      "A project folder containing project.json will be created inside this location.",
     projectTree: "Projects",
     untitledProject: "Untitled Project",
     untitledConversation: "Untitled Chat",
@@ -87,6 +90,7 @@ const messages = {
     generateMainBeforeDetails: "Generate the main image before detail images",
     sourceIdea: "Source Idea",
     originalPrompt: "Original prompt",
+    styleGroup: "Style Group",
     style: "Style",
     aspectRatio: "Aspect Ratio",
     quality: "Render Quality",
@@ -208,6 +212,8 @@ const messages = {
     workflowConfigSortOrder: "Sort order",
     workflowConfigEnabled: "Workflow enabled",
     workflowConfigStrategy: "Execution strategy",
+    workflowConfigStyleGroups: "Style groups",
+    workflowConfigDefaultStyle: "Default style",
     workflowConfigDescription: "Workflow description",
     workflowConfigTemplate: "Analysis template",
     workflowConfigVariables: "Available template variables",
@@ -299,6 +305,7 @@ const messages = {
     recentConversations: "最近对话",
     conversations: "对话",
     newProject: "新建项目",
+    openProject: "打开项目",
     newConversation: "新建对话",
     projectActions: "项目操作",
     conversationActions: "对话操作",
@@ -306,6 +313,8 @@ const messages = {
     openProjectFolderDesktopOnly: "在资源管理器中打开只支持桌面端应用。",
     openProjectFolderError: "无法打开项目文件夹",
     openProjectFolderRestartRequired: "请重启桌面端应用以加载这个新命令。",
+    openProjectDesktopOnly: "打开项目只支持桌面端应用。",
+    openProjectError: "无法打开项目",
     rename: "重命名",
     renameProject: "重命名项目",
     renameConversation: "重命名对话",
@@ -320,10 +329,10 @@ const messages = {
     projectName: "项目名称",
     conversationName: "对话名称",
     parentProject: "所属项目",
-    projectFolder: "项目文件夹",
+    projectFolder: "项目库位置",
     chooseFolder: "选择文件夹",
     defaultProjectFolder: "默认项目库",
-    projectFolderHint: "生成图片、导出结果和项目元数据会保存在这个文件夹中。",
+    projectFolderHint: "会在此位置内创建项目文件夹，project.json 将保存在项目文件夹中。",
     projectTree: "项目",
     untitledProject: "未命名项目",
     untitledConversation: "未命名对话",
@@ -351,6 +360,7 @@ const messages = {
     generateMainBeforeDetails: "先生成主图，再生成详情图",
     sourceIdea: "原始想法",
     originalPrompt: "原始提示词",
+    styleGroup: "风格分组",
     style: "风格",
     aspectRatio: "画面比例",
     quality: "渲染质量",
@@ -467,6 +477,8 @@ const messages = {
     workflowConfigSortOrder: "排序",
     workflowConfigEnabled: "启用工作流",
     workflowConfigStrategy: "执行策略",
+    workflowConfigStyleGroups: "绑定风格组",
+    workflowConfigDefaultStyle: "默认风格",
     workflowConfigDescription: "工作流说明",
     workflowConfigTemplate: "分析提示词模板",
     workflowConfigVariables: "可用模板变量",
@@ -556,21 +568,6 @@ export function getInitialLocale(): Locale {
 export function saveLocale(locale: Locale) {
   window.localStorage.setItem("fangcun-locale", locale);
 }
-
-export const styleLabels: Record<Locale, Record<string, string>> = {
-  en: {
-    "Editorial product study": "Editorial product study",
-    "Quiet cinematic still": "Quiet cinematic still",
-    "Premium ecommerce scene": "Premium ecommerce scene",
-    "Magazine cover concept": "Magazine cover concept",
-  },
-  zh: {
-    "Editorial product study": "编辑感产品研究",
-    "Quiet cinematic still": "安静电影感静帧",
-    "Premium ecommerce scene": "高级电商场景",
-    "Magazine cover concept": "杂志封面概念",
-  },
-};
 
 export const qualityLabels: Record<Locale, Record<Quality, string>> = {
   en: {

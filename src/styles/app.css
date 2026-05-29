@@ -1257,7 +1257,7 @@ select {
   border: 0;
   border-radius: 8px;
   background: transparent;
-  padding: 0 10px;
+  padding: 8px 10px;
   color: var(--ink-soft);
   text-align: left;
 }
@@ -1266,6 +1266,51 @@ select {
 .select-option.selected {
   background: var(--blue-soft);
   color: var(--blue-deep);
+}
+
+.style-option-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.style-option-copy strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 0.84rem;
+  font-weight: 820;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.style-option-copy small {
+  color: var(--ink-soft);
+  font-size: 0.74rem;
+  font-weight: 620;
+  line-height: 1.35;
+}
+
+.style-option-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.style-option-tags em {
+  border-radius: 6px;
+  background: rgba(10, 89, 247, 0.08);
+  color: var(--blue-deep);
+  padding: 2px 6px;
+  font-size: 0.68rem;
+  font-style: normal;
+  font-weight: 760;
+}
+
+.style-usage-hint {
+  margin: -3px 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.45;
 }
 
 .segmented-control {
@@ -2170,6 +2215,12 @@ select {
   height: 16px;
   margin: 0;
   accent-color: var(--blue);
+}
+
+.settings-check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
 }
 
 .save-state {

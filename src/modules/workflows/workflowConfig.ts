@@ -4,6 +4,13 @@ import type {
   WorkflowExecutionStrategy,
   WorkflowMode,
 } from "../../types";
+import {
+  defaultStyleId,
+  ensureStyleForWorkflow,
+  fallbackProductStyleId,
+  getStylePrompt,
+  normalizeStyleGroupIds,
+} from "../styles/styleCatalog";
 
 const workflowModes = ["text-grid", "main-detail"] as const satisfies readonly WorkflowMode[];
 const executionStrategies = [
@@ -20,6 +27,8 @@ export const fallbackWorkflowConfigs = {
     executionStrategy: "matrix_exploration",
     enabled: true,
     sortOrder: 10,
+    styleGroupIds: ["aesthetic-visual", "material-light"],
+    defaultStyleId,
     analysisTemplate: "",
   },
   "main-detail": {
@@ -30,6 +39,8 @@ export const fallbackWorkflowConfigs = {
     executionStrategy: "main_detail_set",
     enabled: true,
     sortOrder: 20,
+    styleGroupIds: ["product-visual-system", "material-light"],
+    defaultStyleId: fallbackProductStyleId,
     analysisTemplate: "",
   },
 } satisfies Record<WorkflowMode, WorkflowConfig>;
@@ -127,7 +138,7 @@ export function createWorkflowTemplateVariables({
     originalPrompt: project.originalPrompt.trim(),
     gridSize: String(project.gridSize),
     detailCount: String(detailCount),
-    style: project.style.trim(),
+    style: getStylePrompt(project.style).trim(),
     aspectRatio: project.aspectRatio,
     quality: project.quality,
     outputSize: project.outputSize,
@@ -163,6 +174,16 @@ function normalizeWorkflowConfig(
   const executionStrategy = isExecutionStrategy(input?.executionStrategy)
     ? input.executionStrategy
     : fallback.executionStrategy;
+  const styleGroupIds = normalizeStyleGroupIds(
+    input?.styleGroupIds ?? fallback.styleGroupIds,
+  );
+  const defaultStyleId = ensureStyleForWorkflow(
+    normalizeText(input?.defaultStyleId, fallback.defaultStyleId),
+    {
+      styleGroupIds,
+      defaultStyleId: fallback.defaultStyleId,
+    },
+  );
 
   return {
     id: mode,
@@ -174,6 +195,8 @@ function normalizeWorkflowConfig(
       typeof input?.sortOrder === "number" && Number.isFinite(input.sortOrder)
         ? input.sortOrder
         : fallback.sortOrder,
+    styleGroupIds,
+    defaultStyleId,
     analysisTemplate: normalizeText(input?.analysisTemplate, fallback.analysisTemplate),
   };
 }

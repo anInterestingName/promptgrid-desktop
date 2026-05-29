@@ -2,11 +2,17 @@ import {
   aspectRatioOptions,
   outputSizeOptions,
   qualityOptions,
-  styleOptions,
 } from "../data/mockProject";
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
-import { outputSizeLabels, qualityLabels, styleLabels, t } from "../i18n";
+import { outputSizeLabels, qualityLabels, t } from "../i18n";
 import { getConfiguredImageProvider } from "../modules/settings/settingsDomain";
+import {
+  getGroupIdForStyleInWorkflow,
+  getStyleById,
+  getStyleGroupsByIds,
+  getStyleLabel,
+  getStylesForGroup,
+} from "../modules/styles/styleCatalog";
 import {
   getEnabledWorkflowConfigs,
   getWorkflowConfig,
@@ -69,9 +75,11 @@ export function PromptPanel() {
     (state) => state.generateDetailImages,
   );
   const [isStyleOpen, setIsStyleOpen] = useState(false);
+  const [isStyleGroupOpen, setIsStyleGroupOpen] = useState(false);
   const [isWorkflowOpen, setIsWorkflowOpen] = useState(false);
   const [isIdeaMenuOpen, setIsIdeaMenuOpen] = useState(false);
   const workflowFieldRef = useRef<HTMLDivElement>(null);
+  const styleGroupFieldRef = useRef<HTMLDivElement>(null);
   const styleFieldRef = useRef<HTMLDivElement>(null);
   const ideaFieldRef = useRef<HTMLDivElement>(null);
   const sourceImageInputRef = useRef<HTMLInputElement>(null);
@@ -80,7 +88,20 @@ export function PromptPanel() {
     settings.workflowConfigs,
     workflowMode,
   );
-  const selectedStyleLabel = styleLabels[locale][project.style];
+  const availableStyleGroups = getStyleGroupsByIds(
+    activeWorkflowConfig.styleGroupIds,
+  );
+  const selectedStyleGroupId = getGroupIdForStyleInWorkflow(
+    project.style,
+    activeWorkflowConfig,
+  );
+  const selectedStyleGroup = availableStyleGroups.find(
+    (group) => group.id === selectedStyleGroupId,
+  );
+  const styleOptions = getStylesForGroup(selectedStyleGroupId);
+  const selectedStyle = getStyleById(project.style);
+  const selectedStyleLabel = getStyleLabel(project.style, locale);
+  const shouldShowStyleGroupSelect = availableStyleGroups.length > 1;
   const configuredImageProvider = getConfiguredImageProvider(settings);
   const configuredImageModel = configuredImageProvider.model;
   const supportsFlexibleOutputSize =
@@ -152,6 +173,17 @@ export function PromptPanel() {
         return;
       }
 
+      if (!isConversationSaved) {
+        setSourceImage({
+          id: `source-${Date.now()}`,
+          kind: "source",
+          imagePath: reader.result,
+          name: file.name,
+          createdAt: new Date().toISOString(),
+        });
+        return;
+      }
+
       void saveReferenceImage({
         imageDataUrl: reader.result,
         project,
@@ -174,6 +206,9 @@ export function PromptPanel() {
       if (!styleFieldRef.current?.contains(event.target as Node)) {
         setIsStyleOpen(false);
       }
+      if (!styleGroupFieldRef.current?.contains(event.target as Node)) {
+        setIsStyleGroupOpen(false);
+      }
       if (
         isIdeaMenuOpen &&
         !ideaFieldRef.current?.contains(event.target as Node)
@@ -193,6 +228,7 @@ export function PromptPanel() {
     }
 
     setIsWorkflowOpen(false);
+    setIsStyleGroupOpen(false);
     setIsStyleOpen(false);
     setIsIdeaMenuOpen(false);
   }, [isConfigurationLocked]);
@@ -312,6 +348,8 @@ export function PromptPanel() {
                     onClick={() => {
                       setWorkflowMode(option.id);
                       setIsWorkflowOpen(false);
+                      setIsStyleGroupOpen(false);
+                      setIsStyleOpen(false);
                     }}
                   >
                     <span>{option.name}</span>
@@ -415,6 +453,79 @@ export function PromptPanel() {
       </section>
 
       <section className="panel-section">
+        {shouldShowStyleGroupSelect ? (
+          <>
+            <label className="field-label" htmlFor="style-group-select">
+              {t(locale, "styleGroup")}
+            </label>
+            <div className="select-field" ref={styleGroupFieldRef}>
+              <button
+                id="style-group-select"
+                className="select-trigger"
+                type="button"
+                aria-controls="style-group-select-options"
+                aria-expanded={isStyleGroupOpen}
+                aria-haspopup="listbox"
+                disabled={isConfigurationLocked}
+                onClick={() => setIsStyleGroupOpen((open) => !open)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") {
+                    setIsStyleGroupOpen(false);
+                  }
+                }}
+              >
+                <span>{selectedStyleGroup?.label[locale] ?? ""}</span>
+                <ChevronDown
+                  className={
+                    isStyleGroupOpen ? "select-arrow open" : "select-arrow"
+                  }
+                  size={18}
+                  aria-hidden="true"
+                />
+              </button>
+
+              {isStyleGroupOpen ? (
+                <div
+                  className="select-menu"
+                  id="style-group-select-options"
+                  role="listbox"
+                  aria-labelledby="style-group-select"
+                >
+                  {availableStyleGroups.map((group) => {
+                    const isSelected = selectedStyleGroupId === group.id;
+                    const defaultGroupStyle = getStylesForGroup(group.id)[0];
+
+                    return (
+                      <button
+                        className={
+                          isSelected
+                            ? "select-option selected"
+                            : "select-option"
+                        }
+                        key={group.id}
+                        role="option"
+                        aria-selected={isSelected}
+                        type="button"
+                        onClick={() => {
+                          if (defaultGroupStyle) {
+                            setStyle(defaultGroupStyle.id);
+                          }
+                          setIsStyleGroupOpen(false);
+                          setIsStyleOpen(false);
+                        }}
+                      >
+                        <span>{group.label[locale]}</span>
+                        {isSelected ? (
+                          <Check size={16} aria-hidden="true" />
+                        ) : null}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
+          </>
+        ) : null}
         <label className="field-label" htmlFor="style-select">
           {t(locale, "style")}
         </label>
@@ -450,23 +561,31 @@ export function PromptPanel() {
               aria-labelledby="style-select"
             >
               {styleOptions.map((style) => {
-                const isSelected = project.style === style;
+                const isSelected = selectedStyle?.id === style.id;
 
                 return (
                   <button
                     className={
                       isSelected ? "select-option selected" : "select-option"
                     }
-                    key={style}
+                    key={style.id}
                     role="option"
                     aria-selected={isSelected}
                     type="button"
                     onClick={() => {
-                      setStyle(style);
+                      setStyle(style.id);
                       setIsStyleOpen(false);
                     }}
                   >
-                    <span>{styleLabels[locale][style]}</span>
+                    <span className="style-option-copy">
+                      <strong>{style.label[locale]}</strong>
+                      <small>{style.usage[locale]}</small>
+                      <span className="style-option-tags">
+                        {style.tags[locale].map((tag) => (
+                          <em key={tag}>{tag}</em>
+                        ))}
+                      </span>
+                    </span>
                     {isSelected ? <Check size={16} aria-hidden="true" /> : null}
                   </button>
                 );
@@ -474,6 +593,9 @@ export function PromptPanel() {
             </div>
           ) : null}
         </div>
+        {selectedStyle ? (
+          <p className="style-usage-hint">{selectedStyle.usage[locale]}</p>
+        ) : null}
       </section>
 
       <section className="panel-section">

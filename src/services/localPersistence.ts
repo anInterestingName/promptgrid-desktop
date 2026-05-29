@@ -84,6 +84,19 @@ export async function pickDataDirectory(): Promise<string | null> {
   return invoke<string | null>("pick_data_directory");
 }
 
+export async function openProjectDirectory(
+  directory: string,
+): Promise<AppSnapshot> {
+  if (!isTauri()) {
+    throw new Error("Open project is only available in the desktop app.");
+  }
+
+  return invoke<AppSnapshot>("open_project_directory", {
+    directory,
+    openedAt: new Date().toISOString(),
+  });
+}
+
 export async function openProjectFolder(project: Project): Promise<void> {
   if (!isTauri()) {
     throw new Error("Open project folder is only available in the desktop app.");

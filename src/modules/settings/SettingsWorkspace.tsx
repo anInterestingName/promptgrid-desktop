@@ -11,6 +11,12 @@ import { useEffect, useState } from "react";
 import { aspectRatioOptions, gridSizeOptions } from "../../data/mockProject";
 import { t, type MessageKey } from "../../i18n";
 import {
+  ensureStyleForWorkflow,
+  getStyleGroupsByIds,
+  getStylesForGroups,
+  styleGroups,
+} from "../styles/styleCatalog";
+import {
   clearProviderApiKey,
   fetchProviderModels,
   saveProviderApiKey,
@@ -173,24 +179,59 @@ export function SettingsWorkspace() {
   };
 
   const selectedWorkflowConfig = settings.workflowConfigs[selectedWorkflowId];
+  const selectedWorkflowStyleGroups = getStyleGroupsByIds(
+    selectedWorkflowConfig.styleGroupIds,
+  );
+  const selectedWorkflowStyles = getStylesForGroups(
+    selectedWorkflowConfig.styleGroupIds,
+  );
+  const selectedWorkflowPreviewProject = {
+    ...project,
+    style: selectedWorkflowConfig.defaultStyleId,
+  };
   const workflowPromptPreview = renderWorkflowAnalysisTemplate(
     selectedWorkflowConfig.analysisTemplate,
     createWorkflowTemplateVariables({
-      project,
+      project: selectedWorkflowPreviewProject,
       hasSourceImage: Boolean(mainDetail.sourceImage),
     }),
   );
 
   const updateWorkflowConfig = (update: Partial<WorkflowConfig>) => {
+    const nextWorkflowConfig = {
+      ...selectedWorkflowConfig,
+      ...update,
+      id: selectedWorkflowId,
+    };
+    const normalizedDefaultStyleId = ensureStyleForWorkflow(
+      nextWorkflowConfig.defaultStyleId,
+      nextWorkflowConfig,
+    );
+
     updateSettings({
       workflowConfigs: {
         ...settings.workflowConfigs,
         [selectedWorkflowId]: {
-          ...selectedWorkflowConfig,
-          ...update,
-          id: selectedWorkflowId,
+          ...nextWorkflowConfig,
+          defaultStyleId: normalizedDefaultStyleId,
         },
       },
+    });
+  };
+
+  const toggleWorkflowStyleGroup = (styleGroupId: string) => {
+    const currentGroupIds = selectedWorkflowConfig.styleGroupIds;
+    const nextGroupIds = currentGroupIds.includes(styleGroupId)
+      ? currentGroupIds.filter((groupId) => groupId !== styleGroupId)
+      : [...currentGroupIds, styleGroupId];
+
+    if (nextGroupIds.length === 0) {
+      return;
+    }
+
+    updateWorkflowConfig({
+      styleGroupIds: nextGroupIds,
+      defaultStyleId: selectedWorkflowConfig.defaultStyleId,
     });
   };
 
@@ -1041,6 +1082,49 @@ export function SettingsWorkspace() {
                   />
                 </label>
               </div>
+
+              <div className="settings-field wide-field">
+                <span>{t(locale, "workflowConfigStyleGroups")}</span>
+                <div className="settings-check-grid">
+                  {styleGroups.map((group) => (
+                    <label className="settings-check" key={group.id}>
+                      <input
+                        checked={selectedWorkflowConfig.styleGroupIds.includes(
+                          group.id,
+                        )}
+                        type="checkbox"
+                        onChange={() => toggleWorkflowStyleGroup(group.id)}
+                      />
+                      <span>{group.label[locale]}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <label className="settings-field wide-field">
+                <span>{t(locale, "workflowConfigDefaultStyle")}</span>
+                <select
+                  className="settings-input"
+                  value={selectedWorkflowConfig.defaultStyleId}
+                  onChange={(event) =>
+                    updateWorkflowConfig({
+                      defaultStyleId: event.target.value,
+                    })
+                  }
+                >
+                  {selectedWorkflowStyleGroups.map((group) => (
+                    <optgroup key={group.id} label={group.label[locale]}>
+                      {selectedWorkflowStyles
+                        .filter((style) => style.groupId === group.id)
+                        .map((style) => (
+                          <option key={style.id} value={style.id}>
+                            {style.label[locale]}
+                          </option>
+                        ))}
+                    </optgroup>
+                  ))}
+                </select>
+              </label>
 
               <label className="settings-field wide-field">
                 <span>{t(locale, "workflowConfigDescription")}</span>

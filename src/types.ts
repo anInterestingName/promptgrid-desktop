@@ -68,7 +68,44 @@ export type WorkflowConfig = {
   executionStrategy: WorkflowExecutionStrategy;
   enabled: boolean;
   sortOrder: number;
+  styleGroupIds: string[];
+  defaultStyleId: string;
   analysisTemplate: string;
+};
+
+export type VisualStyle = {
+  id: string;
+  groupId: string;
+  label: {
+    en: string;
+    zh: string;
+  };
+  description: {
+    en: string;
+    zh: string;
+  };
+  usage: {
+    en: string;
+    zh: string;
+  };
+  tags: {
+    en: string[];
+    zh: string[];
+  };
+  prompt: string;
+};
+
+export type StyleGroup = {
+  id: string;
+  label: {
+    en: string;
+    zh: string;
+  };
+  description: {
+    en: string;
+    zh: string;
+  };
+  styleIds: string[];
 };
 
 export type ImageAsset = {
